@@ -1,0 +1,6 @@
+[providers]
+node = "20"
+
+[phases.setup]
+nixPkgs = ["nodejs_20", "pnpm-9_x", "openssl"]
+
