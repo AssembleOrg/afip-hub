@@ -5,23 +5,27 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import * as xml2js from 'xml2js';
-import { AfipLoginDto, AfipTicketDto } from './dto';
-import { CreateInvoiceDto, TipoComprobante } from './dto/create-invoice.dto';
-import { InvoiceResponseDto } from './dto/invoice-response.dto';
+import { AfipTicketDto } from './dto';
+import { 
+  CreateInvoiceDto, 
+  TipoComprobante, 
+  CondicionIvaReceptor,
+  getClaseComprobante,
+  esNotaCreditoDebito,
+  esFacturaCreditoElectronica,
+  getCondicionesIvaValidas,
+} from './dto/create-invoice.dto';
+import { InvoiceResponseDto, QrDataDto } from './dto/invoice-response.dto';
+import { ConsultarContribuyenteDto, ContribuyenteResponseDto } from './dto/consultar-contribuyente.dto';
 
 @Injectable()
 export class AfipService {
   private readonly logger = new Logger(AfipService.name);
   private wsaaUrl: string;
-  private certPath: string;
-  private keyPath: string;
-  private cuit: string;
 
   constructor(private configService: ConfigService) {
     this.wsaaUrl = this.configService.get<string>('afip.wsaaUrl') || '';
-    this.certPath = this.configService.get<string>('afip.certPath') || '';
-    this.keyPath = this.configService.get<string>('afip.keyPath') || '';
-    this.cuit = this.configService.get<string>('afip.cuit') || '';
+ 
   }
 
   /**
@@ -531,6 +535,287 @@ export class AfipService {
   }
 
   /**
+   * Consulta datos de un contribuyente en AFIP usando el servicio Padrón A5
+   * 
+   * @param consultaDto - DTO con CUIT a consultar, certificado, clave y CUIT emisor
+   * @returns Promise<ContribuyenteResponseDto> - Datos del contribuyente consultado
+   * 
+   * @example
+   * const datos = await this.consultarContribuyente({
+   *   cuit: '20386949604',
+   *   cuitEmisor: '20123456789',
+   *   certificado: '...',
+   *   clavePrivada: '...'
+   * });
+   * console.log('Nombre:', datos.denominacion);
+   * console.log('Condición IVA:', datos.condicionIva);
+   */
+  async consultarContribuyente(
+    consultaDto: ConsultarContribuyenteDto,
+  ): Promise<ContribuyenteResponseDto> {
+    try {
+      this.logger.log('=== INICIO CONSULTA CONTRIBUYENTE ===');
+      this.logger.log(`CUIT a consultar: ${consultaDto.cuit}`);
+      this.logger.log(`CUIT emisor: ${consultaDto.cuitEmisor}`);
+
+      // Validar que se proporcionen certificado, clave y CUIT
+      const certificado = consultaDto.certificado;
+      const clavePrivada = consultaDto.clavePrivada;
+      const cuitEmisorRaw = consultaDto.cuitEmisor;
+      const cuitAConsultar = consultaDto.cuit.replace(/-/g, ''); // Remover guiones
+
+      if (!certificado || !clavePrivada || !cuitEmisorRaw) {
+        throw new BadRequestException(
+          'certificado, clavePrivada y cuitEmisor son requeridos',
+        );
+      }
+
+      const cuitEmisor = cuitEmisorRaw.replace(/-/g, ''); // Remover guiones
+
+      // Obtener ticket del servicio de Constancia de Inscripción
+      // ID del servicio según manual v3.4: ws_sr_constancia_inscripcion
+      this.logger.log('Obteniendo ticket del servicio ws_sr_constancia_inscripcion...');
+      const ticket = await this.getTicket('ws_sr_constancia_inscripcion', certificado, clavePrivada);
+      this.logger.log(`Ticket obtenido, válido hasta: ${ticket.expirationTime}`);
+
+      // URL del servicio de Constancia de Inscripción
+      // Según manual v3.4: usa personaServiceA5 (aunque el servicio se llama ws_sr_constancia_inscripcion)
+      const padronUrl = this.configService.get<string>('afip.padronUrl') || 
+        'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA5?WSDL';
+
+      this.logger.log(`URL Constancia de Inscripción: ${padronUrl}`);
+
+      return new Promise((resolve, reject) => {
+        soap.createClient(padronUrl, (err: any, client: any) => {
+          if (err) {
+            this.logger.error(`Error al crear cliente SOAP Padrón: ${err.message}`);
+            reject(
+              new BadRequestException(
+                `Error al crear cliente SOAP Padrón: ${err.message}`,
+              ),
+            );
+            return;
+          }
+
+          // Log métodos disponibles para debugging
+          this.logger.log('Métodos disponibles en el cliente Constancia de Inscripción:');
+          this.logger.log(Object.keys(client).filter(key => typeof client[key] === 'function').join(', '));
+
+          // Estructura del request según documentación oficial Constancia de Inscripción v3.4
+          // https://www.afip.gob.ar/ws/WSCI/manual-ws-sr-ws-constancia-inscripcion-v3.4.pdf
+          const req = {
+            token: ticket.token,
+            sign: ticket.sign,
+            cuitRepresentada: cuitEmisor,
+            idPersona: cuitAConsultar, // CUIT del contribuyente a consultar
+          };
+
+          this.logger.log('=== REQUEST getPersona_v2 (Constancia de Inscripción) ===');
+          this.logger.log(JSON.stringify(req, null, 2));
+
+          // Método según documentación v3.4: getPersona_v2 (versión más reciente)
+          // También existe getPersona pero se recomienda usar _v2
+          const methodName = client.getPersona_v2 ? 'getPersona_v2' : 
+                            client.getPersona ? 'getPersona' : null;
+
+          if (!methodName) {
+            this.logger.error('No se encontró método válido en el servicio de Constancia de Inscripción');
+            this.logger.error('Métodos disponibles:', Object.keys(client).filter(k => typeof client[k] === 'function'));
+            reject(
+              new BadRequestException(
+                'No se encontró método getPersona_v2 o getPersona en el servicio de Constancia de Inscripción de AFIP',
+              ),
+            );
+            return;
+          }
+
+          this.logger.log(`Usando método: ${methodName}`);
+
+          client[methodName](req, (err: any, result: any) => {
+            this.logger.log(`=== RESPONSE ${methodName} (Constancia de Inscripción) ===`);
+            
+            if (err) {
+              this.logger.error(`Error al consultar contribuyente: ${err.message}`);
+              // Intentar loguear el error de forma segura
+              try {
+                this.logger.error(JSON.stringify(err, null, 2));
+              } catch (e) {
+                this.logger.error(`Error (no serializable): ${err.toString()}`);
+              }
+              reject(
+                new BadRequestException(
+                  `Error al consultar contribuyente: ${err.message}`,
+                ),
+              );
+              return;
+            }
+
+            // Parsear respuesta según estructura del servicio de Constancia de Inscripción
+            // La respuesta viene en result.personaReturn según el WSDL
+            const personaReturn = result.personaReturn || result;
+            
+            // Loguear la respuesta de forma segura (evitando referencias circulares)
+            try {
+              this.logger.log(JSON.stringify(personaReturn, null, 2));
+            } catch (e) {
+              // Si hay referencias circulares, loguear solo las propiedades principales
+              this.logger.log(`personaReturn (estructura compleja): ${JSON.stringify({
+                hasDatosGenerales: !!personaReturn.datosGenerales,
+                hasDatosRegimenGeneral: !!personaReturn.datosRegimenGeneral,
+                errorConstancia: personaReturn.errorConstancia,
+              }, null, 2)}`);
+            }
+
+            this.logger.log('=== personaReturn (Constancia de Inscripción) ===');
+            // Loguear de forma segura evitando referencias circulares
+            try {
+              // Extraer solo los datos relevantes para evitar referencias circulares
+              const safePersonaReturn = {
+                errorConstancia: personaReturn.errorConstancia,
+                datosGenerales: personaReturn.datosGenerales ? {
+                  tipoPersona: personaReturn.datosGenerales.tipoPersona,
+                  nombre: personaReturn.datosGenerales.nombre,
+                  apellido: personaReturn.datosGenerales.apellido,
+                  razonSocial: personaReturn.datosGenerales.razonSocial,
+                  estadoClave: personaReturn.datosGenerales.estadoClave,
+                  fechaInscripcion: personaReturn.datosGenerales.fechaInscripcion,
+                  domicilio: personaReturn.datosGenerales.domicilio ? 
+                    personaReturn.datosGenerales.domicilio.map((dom: any) => ({
+                      direccion: dom.direccion,
+                      localidad: dom.localidad,
+                      descripcionProvincia: dom.descripcionProvincia,
+                      codPostal: dom.codPostal,
+                    })) : undefined,
+                } : undefined,
+                datosRegimenGeneral: personaReturn.datosRegimenGeneral ? {
+                  impuestoIVA: personaReturn.datosRegimenGeneral.impuestoIVA ? 
+                    personaReturn.datosRegimenGeneral.impuestoIVA.map((imp: any) => ({
+                      idImpuesto: imp.idImpuesto,
+                      descripcionImpuesto: imp.descripcionImpuesto,
+                    })) : undefined,
+                } : undefined,
+              };
+              this.logger.log(JSON.stringify(safePersonaReturn, null, 2));
+            } catch (e) {
+              this.logger.log(`personaReturn (no serializable, extrayendo datos básicos): ${JSON.stringify({
+                hasDatosGenerales: !!personaReturn.datosGenerales,
+                hasDatosRegimenGeneral: !!personaReturn.datosRegimenGeneral,
+                errorConstancia: personaReturn.errorConstancia,
+              }, null, 2)}`);
+            }
+
+            // Verificar errores
+            if (personaReturn.errorConstancia) {
+              this.logger.error(`Error de AFIP: ${personaReturn.errorConstancia}`);
+              reject(
+                new BadRequestException(
+                  `Error al consultar contribuyente: ${personaReturn.errorConstancia}`,
+                ),
+              );
+              return;
+            }
+
+            // Verificar que haya datos
+            if (!personaReturn || !personaReturn.datosGenerales) {
+              reject(
+                new BadRequestException(
+                  'No se encontraron datos del contribuyente',
+                ),
+              );
+              return;
+            }
+
+            // Mapear condición IVA desde datosRegimenGeneral
+            const datosGenerales = personaReturn.datosGenerales || {};
+            const datosRegimenGeneral = personaReturn.datosRegimenGeneral || {};
+            
+            const condicionIvaMap: { [key: number]: string } = {
+              1: 'No Responsable',
+              2: 'Exento',
+              3: 'No Gravado',
+              4: 'Responsable Inscripto',
+              5: 'Responsable No Inscripto (Consumidor Final)',
+              6: 'Monotributo',
+              7: 'Responsable Monotributo',
+              8: 'Proyecto',
+            };
+
+            // Obtener condición IVA desde datosRegimenGeneral.impuestoIVA
+            let condicionIvaCodigo = 5; // Default: Consumidor Final
+            if (datosRegimenGeneral.impuestoIVA && datosRegimenGeneral.impuestoIVA.length > 0) {
+              // Tomar el primer impuesto IVA activo
+              const impuestoIVA = datosRegimenGeneral.impuestoIVA.find((imp: any) => imp.idImpuesto);
+              if (impuestoIVA && impuestoIVA.idImpuesto) {
+                condicionIvaCodigo = parseInt(impuestoIVA.idImpuesto);
+              }
+            }
+            const condicionIvaTexto = condicionIvaMap[condicionIvaCodigo] || 'Desconocida';
+
+            // Obtener tipo de persona
+            const tipoPersona = datosGenerales.tipoPersona === 'FISICA' ? 'FISICA' : 
+                               datosGenerales.tipoPersona === 'JURIDICA' ? 'JURIDICA' :
+                               datosGenerales.tipoPersona || 'FISICA';
+
+            // Denominación: para personas físicas usa nombre + apellido, para jurídicas usa razón social
+            let denominacion = 'Sin denominación';
+            if (tipoPersona === 'FISICA') {
+              const nombre = datosGenerales.nombre || '';
+              const apellido = datosGenerales.apellido || '';
+              denominacion = `${nombre} ${apellido}`.trim() || 'Sin denominación';
+            } else {
+              denominacion = datosGenerales.razonSocial || 'Sin denominación';
+            }
+
+            // Estado: según documentación viene en estadoClave
+            const estadoClave = datosGenerales.estadoClave || '';
+            const estado = estadoClave === 'ACTIVO' || estadoClave === 'Activo' ? 'ACTIVO' : 
+                          estadoClave === 'INACTIVO' || estadoClave === 'Inactivo' ? 'INACTIVO' :
+                          estadoClave || 'ACTIVO';
+
+            // Domicilio: devolver el objeto completo tal cual viene de AFIP
+            let domicilio: any = undefined;
+            
+            // Primero intentar con domicilioFiscal (estructura más común en Constancia de Inscripción)
+            if (datosGenerales.domicilioFiscal) {
+              domicilio = datosGenerales.domicilioFiscal;
+            }
+            // Si no hay domicilioFiscal, intentar con array domicilio
+            else if (datosGenerales.domicilio && Array.isArray(datosGenerales.domicilio) && datosGenerales.domicilio.length > 0) {
+              domicilio = datosGenerales.domicilio[0]; // Tomar el primer domicilio
+            }
+
+            // Fecha de inscripción (si está disponible)
+            const fechaInscripcion = datosGenerales.fechaInscripcion || undefined;
+
+            const response: ContribuyenteResponseDto = {
+              cuit: cuitAConsultar,
+              denominacion: denominacion,
+              tipoPersona: tipoPersona,
+              condicionIva: condicionIvaTexto,
+              condicionIvaCodigo: condicionIvaCodigo,
+              estado: estado,
+              domicilio: domicilio,
+              fechaInscripcion: fechaInscripcion,
+            };
+
+            this.logger.log('=== DATOS CONTRIBUYENTE (Constancia de Inscripción) ===');
+            this.logger.log(JSON.stringify(response, null, 2));
+            this.logger.log('=== FIN CONSULTA CONTRIBUYENTE ===');
+
+            resolve(response);
+          });
+        });
+      });
+    } catch (error: any) {
+      this.logger.error(`Error general al consultar contribuyente: ${error.message}`);
+      this.logger.error(`Stack: ${error.stack}`);
+      throw new BadRequestException(
+        `Error al consultar contribuyente: ${error.message}`,
+      );
+    }
+  }
+
+  /**
    * Crea una factura electrónica usando el servicio WSFE de AFIP
    * 
    * @param invoiceData - Datos de la factura a crear
@@ -665,7 +950,6 @@ export class AfipService {
       // Para consumidor final (DocTipo = 99), DocNro debe ser 0
       // Para otros tipos de documento, DocNro debe ser > 0
       let docNro: number;
-      // TipoDocumento.CONSUMIDOR_FINAL = 99
       const docTipoValue = Number(invoiceData.tipoDocumento);
       if (docTipoValue === 99) {
         // Consumidor Final: DocNro siempre es 0
@@ -684,28 +968,52 @@ export class AfipService {
       const monId = invoiceData.monedaId || 'PES';
       const monCotiz = invoiceData.cotizacionMoneda || 1;
 
-      // Condición frente al IVA del receptor
-      // Para Factura C (tipoComprobante = 11), por defecto es Consumidor Final (5)
-      // Para otros tipos, es opcional pero recomendado
-      let condicionIva = (invoiceData as any).condicionIvaReceptor;
+      // Determinar la clase de comprobante para validaciones
       const tipoComprobanteValue = Number(invoiceData.tipoComprobante);
-      if (tipoComprobanteValue === TipoComprobante.FACTURA_C || tipoComprobanteValue === 11) {
-        // Factura C: por defecto Consumidor Final (5 = Responsable No Inscripto)
-        if (!condicionIva) {
-          condicionIva = 5;
-          this.logger.log('Factura C detectada: usando condición IVA por defecto = 5 (Consumidor Final)');
+      const claseComprobante = getClaseComprobante(tipoComprobanteValue);
+      this.logger.log(`Clase de comprobante: ${claseComprobante}`);
+
+      // Condición frente al IVA del receptor
+      // Según Manual ARCA-COMPG v4.0 - Obligatorio desde 01/02/2026
+      let condicionIva = invoiceData.condicionIvaReceptor;
+      
+      // Asignar valor por defecto según clase de comprobante
+      if (!condicionIva) {
+        switch (claseComprobante) {
+          case 'A':
+          case 'M':
+          case 'FCE_A':
+            // Clase A/M: receptor debe ser Responsable Inscripto o Monotributista
+            condicionIva = CondicionIvaReceptor.IVA_RESPONSABLE_INSCRIPTO;
+            this.logger.log(`Comprobante clase ${claseComprobante}: usando condición IVA por defecto = 1 (Responsable Inscripto)`);
+            break;
+          case 'B':
+          case 'FCE_B':
+            // Clase B: receptor puede ser Consumidor Final, Exento, etc.
+            condicionIva = CondicionIvaReceptor.CONSUMIDOR_FINAL;
+            this.logger.log(`Comprobante clase ${claseComprobante}: usando condición IVA por defecto = 5 (Consumidor Final)`);
+            break;
+          case 'C':
+          case 'FCE_C':
+            // Clase C (Monotributo): receptor puede ser cualquiera
+            condicionIva = CondicionIvaReceptor.CONSUMIDOR_FINAL;
+            this.logger.log(`Comprobante clase ${claseComprobante}: usando condición IVA por defecto = 5 (Consumidor Final)`);
+            break;
+        }
+      } else {
+        // Validar que la condición IVA sea válida para la clase de comprobante
+        const condicionesValidas = getCondicionesIvaValidas(claseComprobante);
+        if (condicionesValidas.length > 0 && !condicionesValidas.includes(condicionIva)) {
+          this.logger.warn(`Condición IVA ${condicionIva} no es válida para clase ${claseComprobante}. Valores válidos: ${condicionesValidas.join(', ')}`);
         }
       }
 
       this.logger.log(`DocTipo: ${invoiceData.tipoDocumento}, DocNro: ${docNro}`);
       this.logger.log(`MonId: ${monId}, MonCotiz: ${monCotiz}`);
       this.logger.log(`Concepto: ${invoiceData.concepto} (1=Productos, 2=Servicios, 3=Productos+Servicios)`);
-      if (condicionIva) {
-        this.logger.log(`Condición IVA Receptor: ${condicionIva}`);
-      }
+      this.logger.log(`Condición IVA Receptor: ${condicionIva}`);
       
       // Construir el detalle de la factura
-      // Las fechas FchServDesde, FchServHasta y FchVtoPago solo se envían si Concepto = 2 o 3
       const detalle: any = {
         Concepto: invoiceData.concepto,
         DocTipo: invoiceData.tipoDocumento,
@@ -714,25 +1022,96 @@ export class AfipService {
         CbteHasta: numeroAUsar,
         CbteFch: fechaCbte,
         ImpTotal: invoiceData.importeTotal,
-        ImpTotConc: 0,
+        ImpTotConc: invoiceData.importeNetoNoGravado || 0,
         ImpNeto: invoiceData.importeNetoGravado,
-        ImpOpEx: 0,
+        ImpOpEx: invoiceData.importeExento || 0,
         ImpIVA: invoiceData.importeIva,
-        ImpTrib: 0,
+        ImpTrib: invoiceData.importeTributos || 0,
         MonId: monId,
         MonCotiz: monCotiz,
       };
 
-      // Incluir condición IVA del receptor si está definida
+      // Incluir descuento/bonificación si se proporciona
+      if (invoiceData.importeDescuento && invoiceData.importeDescuento > 0) {
+        detalle.ImpBonif = invoiceData.importeDescuento;
+        this.logger.log(`Descuento/Bonificación aplicado: ${invoiceData.importeDescuento}`);
+      }
+
+      // Incluir condición IVA del receptor (obligatorio desde 01/02/2026)
       if (condicionIva) {
         detalle.IvaCond = condicionIva;
       }
 
-      // Solo servicios (2) o productos+servicios (3) llevan fechas de servicio
+      // Array de IVA - Requerido para Facturas A, B, M cuando hay IVA
+      // Según Manual ARCA-COMPG v4.0: debe enviarse el desglose de alícuotas
+      if (invoiceData.iva && invoiceData.iva.length > 0) {
+        detalle.Iva = {
+          AlicIva: invoiceData.iva.map(iva => ({
+            Id: iva.Id,
+            BaseImp: iva.BaseImp,
+            Importe: iva.Importe,
+          })),
+        };
+        this.logger.log(`Array de IVA incluido con ${invoiceData.iva.length} alícuota(s)`);
+      } else if (invoiceData.importeIva > 0 && (claseComprobante === 'A' || claseComprobante === 'B' || claseComprobante === 'M')) {
+        // Si hay IVA pero no se envió el array, crear uno con IVA 21%
+        detalle.Iva = {
+          AlicIva: [{
+            Id: 5, // 21%
+            BaseImp: invoiceData.importeNetoGravado,
+            Importe: invoiceData.importeIva,
+          }],
+        };
+        this.logger.log('Array de IVA generado automáticamente con alícuota 21%');
+      }
+
+      // Comprobantes asociados - Requerido para Notas de Crédito/Débito
+      if (esNotaCreditoDebito(tipoComprobanteValue)) {
+        if (invoiceData.comprobantesAsociados && invoiceData.comprobantesAsociados.length > 0) {
+          detalle.CbtesAsoc = {
+            CbteAsoc: invoiceData.comprobantesAsociados.map(cbte => {
+              const asoc: any = {
+                Tipo: cbte.Tipo,
+                PtoVta: cbte.PtoVta,
+                Nro: cbte.Nro,
+                CbteFch: cbte.CbteFch,
+              };
+              if (cbte.Cuit) {
+                asoc.Cuit = cbte.Cuit.replace(/-/g, '');
+              }
+              return asoc;
+            }),
+          };
+          this.logger.log(`Comprobantes asociados incluidos: ${invoiceData.comprobantesAsociados.length}`);
+        } else {
+          this.logger.warn('Nota de Crédito/Débito sin comprobantes asociados - AFIP puede rechazarla');
+        }
+      }
+
+      // Campos para Facturas de Crédito Electrónica (MiPyME)
+      if (esFacturaCreditoElectronica(tipoComprobanteValue)) {
+        if (invoiceData.cbu) {
+          detalle.Opcionales = {
+            Opcional: [
+              { Id: 2101, Valor: invoiceData.cbu.Cbu }, // CBU
+            ],
+          };
+          if (invoiceData.cbu.Alias) {
+            detalle.Opcionales.Opcional.push({ Id: 2102, Valor: invoiceData.cbu.Alias });
+          }
+          this.logger.log('Datos de CBU incluidos para FCE');
+        }
+        if (invoiceData.fceVtoPago) {
+          detalle.FchVtoPago = invoiceData.fceVtoPago;
+          this.logger.log(`Fecha vencimiento FCE: ${invoiceData.fceVtoPago}`);
+        }
+      }
+
+      // Fechas de servicio - Solo para Concepto 2 (Servicios) o 3 (Productos + Servicios)
       if (invoiceData.concepto === 2 || invoiceData.concepto === 3) {
-        detalle.FchServDesde = fechaCbte;
-        detalle.FchServHasta = fechaCbte;
-        detalle.FchVtoPago = fechaCbte;
+        detalle.FchServDesde = invoiceData.fechaServicioDesde || fechaCbte;
+        detalle.FchServHasta = invoiceData.fechaServicioHasta || fechaCbte;
+        detalle.FchVtoPago = invoiceData.fechaVencimientoPago || fechaCbte;
         this.logger.log('Incluyendo fechas de servicio (Concepto 2 o 3)');
       } else {
         this.logger.log('Omitiendo fechas de servicio (Concepto 1 - Productos)');
@@ -790,15 +1169,21 @@ export class AfipService {
               this.logger.log('=== FECAESolicitarResult ===');
               this.logger.log(JSON.stringify(response, null, 2));
 
-              // Verificar errores en la cabecera
-              if (response.Errors && response.Errors.length > 0) {
-                this.logger.error('=== ERRORES DE AFIP (Cabecera) ===');
-                response.Errors.forEach((error: any, index: number) => {
-                  this.logger.error(`Error ${index + 1}: Code=${error.Code}, Msg=${error.Msg}`);
-                });
-                const errorMsg = response.Errors.map((e: any) => `${e.Code}: ${e.Msg}`).join(', ');
-                reject(new BadRequestException(`Error de AFIP: ${errorMsg}`));
-                return;
+              // Verificar errores en la cabecera (estructura: Errors.Err[])
+              // No rechazar aquí, dejar que se procesen junto con las observaciones del detalle
+              if (response.Errors) {
+                const errArray = response.Errors.Err 
+                  ? (Array.isArray(response.Errors.Err) ? response.Errors.Err : [response.Errors.Err])
+                  : (Array.isArray(response.Errors) ? response.Errors : []);
+                
+                if (errArray.length > 0) {
+                  this.logger.error('=== ERRORES CRÍTICOS DE AFIP (Cabecera) ===');
+                  errArray.forEach((error: any, index: number) => {
+                    const code = error.Code || error.code || 'N/A';
+                    const msg = error.Msg || error.msg || error.message || JSON.stringify(error);
+                    this.logger.error(`Error ${index + 1}: Code=${code}, Msg=${msg}`);
+                  });
+                }
               }
 
               // Verificar que existe FeDetResp
@@ -821,11 +1206,34 @@ export class AfipService {
               this.logger.log('=== DETALLE DE LA FACTURA ===');
               this.logger.log(JSON.stringify(factura, null, 2));
 
-              // Extraer observaciones (pueden estar en diferentes formatos)
-              // AFIP puede enviar: Observaciones.Obs[] con {Code, Msg} o formato simple
+              // Extraer errores y observaciones (pueden estar en diferentes formatos)
+              // AFIP puede enviar:
+              // 1. Errors.Err[] a nivel de respuesta (errores críticos)
+              // 2. Observaciones.Obs[] en el detalle (observaciones/advertencias)
               let observaciones: string[] = [];
               let observacionesDetalladas: Array<{ code: number; msg: string }> = [];
 
+              // Primero, parsear errores críticos de la respuesta completa
+              if (response.Errors && response.Errors.Err) {
+                const errArray = Array.isArray(response.Errors.Err) 
+                  ? response.Errors.Err 
+                  : [response.Errors.Err];
+                
+                errArray.forEach((err: any) => {
+                  if (err.Code && err.Msg) {
+                    const code = Number(err.Code);
+                    const msg = err.Msg;
+                    observacionesDetalladas.push({ code, msg });
+                    observaciones.push(`${code}: ${msg}`);
+                    this.logger.error(`[ERROR CRÍTICO ${code}] ${msg}`);
+                  } else if (err.Msg) {
+                    observaciones.push(err.Msg);
+                    this.logger.error(`[ERROR] ${err.Msg}`);
+                  }
+                });
+              }
+
+              // Luego, parsear observaciones del detalle de la factura
               if (factura.Observaciones) {
                 // Formato: Observaciones.Obs[] con objetos {Code, Msg}
                 if (factura.Observaciones.Obs) {
@@ -876,15 +1284,17 @@ export class AfipService {
               this.logger.log(`CAE: ${factura.CAE || '(vacío)'}`);
               this.logger.log(`CAE Fch Vto: ${factura.CAEFchVto || '(vacío)'}`);
 
-              if (observaciones.length > 0) {
-                this.logger.warn('=== OBSERVACIONES DE AFIP ===');
+              // Loggear todos los errores y observaciones
+              if (observacionesDetalladas.length > 0) {
+                this.logger.error('=== ERRORES Y OBSERVACIONES DE AFIP ===');
                 observacionesDetalladas.forEach((obs, index) => {
-                  this.logger.warn(`[${obs.code}] ${obs.msg}`);
+                  this.logger.error(`[${obs.code}] ${obs.msg}`);
                 });
+              }
+              if (observaciones.length > 0 && observacionesDetalladas.length === 0) {
+                this.logger.warn('=== OBSERVACIONES DE AFIP ===');
                 observaciones.forEach((obs, index) => {
-                  if (!observacionesDetalladas.some(d => obs.includes(`${d.code}:`))) {
-                    this.logger.warn(`Observación ${index + 1}: ${obs}`);
-                  }
+                  this.logger.warn(`Observación ${index + 1}: ${obs}`);
                 });
               }
 
@@ -926,19 +1336,42 @@ export class AfipService {
                 this.logger.log(`Número de comprobante: ${factura.CbteDesde || invoiceData.numeroComprobante}`);
               }
 
+              // Generar datos para el código QR (RG 4291)
+              let qrData: QrDataDto | undefined;
+              if (factura.CAE && resultado === 'A') {
+                qrData = this.generateQrData({
+                  cuit: cuitEmisor,
+                  ptoVta: invoiceData.puntoVenta,
+                  tipoCmp: tipoComprobanteValue,
+                  nroCmp: factura.CbteDesde || numeroAUsar,
+                  fecha: fechaCbte,
+                  importe: invoiceData.importeTotal,
+                  moneda: monId,
+                  ctz: monCotiz,
+                  tipoDocRec: docTipoValue,
+                  nroDocRec: docNro,
+                  codAut: factura.CAE,
+                });
+                this.logger.log(`QR URL generada: ${qrData.url}`);
+              }
+
               const invoiceResponse: InvoiceResponseDto = {
                 cae: factura.CAE || '',
                 caeFchVto: factura.CAEFchVto || '',
                 puntoVenta: invoiceData.puntoVenta,
-                tipoComprobante: invoiceData.tipoComprobante,
+                tipoComprobante: tipoComprobanteValue,
                 numeroComprobante: factura.CbteDesde || numeroAUsar,
                 fechaComprobante: fechaCbte,
                 importeTotal: invoiceData.importeTotal,
                 resultado: resultado,
                 codigoAutorizacion: factura.CAE,
+                cuitEmisor: cuitEmisor,
+                tipoDocReceptor: docTipoValue,
+                nroDocReceptor: String(docNro),
                 observaciones: observaciones.length > 0 ? observaciones : undefined,
                 ...(observacionesDetalladas.length > 0 && { observacionesDetalladas }),
-              } as InvoiceResponseDto;
+                ...(qrData && { qrData }),
+              };
 
               this.logger.log('=== RESPUESTA FINAL ===');
               this.logger.log(JSON.stringify(invoiceResponse, null, 2));
@@ -960,6 +1393,197 @@ export class AfipService {
         `Error al crear factura electrónica: ${error.message}`,
       );
     }
+  }
+
+  /**
+   * Genera los datos para el código QR según especificación AFIP RG 4291
+   * https://www.afip.gob.ar/fe/qr/especificaciones.asp
+   * 
+   * El QR contiene información del comprobante codificada en base64 y se accede
+   * mediante la URL: https://www.afip.gob.ar/fe/qr/?p={datos_base64}
+   */
+  private generateQrData(params: {
+    cuit: string;
+    ptoVta: number;
+    tipoCmp: number;
+    nroCmp: number;
+    fecha: string; // YYYYMMDD
+    importe: number;
+    moneda: string;
+    ctz: number;
+    tipoDocRec: number;
+    nroDocRec: number;
+    codAut: string;
+  }): QrDataDto {
+    // Formatear la fecha de YYYYMMDD a YYYY-MM-DD
+    const fechaFormateada = `${params.fecha.substring(0, 4)}-${params.fecha.substring(4, 6)}-${params.fecha.substring(6, 8)}`;
+    
+    // Estructura JSON según especificación AFIP
+    const qrJson = {
+      ver: 1,
+      fecha: fechaFormateada,
+      cuit: parseInt(params.cuit),
+      ptoVta: params.ptoVta,
+      tipoCmp: params.tipoCmp,
+      nroCmp: params.nroCmp,
+      importe: params.importe,
+      moneda: params.moneda,
+      ctz: params.ctz,
+      tipoDocRec: params.tipoDocRec,
+      nroDocRec: params.nroDocRec,
+      tipoCodAut: 'E', // E = CAE, A = CAEA
+      codAut: parseInt(params.codAut),
+    };
+
+    // Codificar en base64 y generar URL
+    const jsonString = JSON.stringify(qrJson);
+    const base64Data = Buffer.from(jsonString).toString('base64');
+    const qrUrl = `https://www.afip.gob.ar/fe/qr/?p=${base64Data}`;
+
+    return {
+      ver: 1,
+      fecha: fechaFormateada,
+      cuit: params.cuit,
+      ptoVta: params.ptoVta,
+      tipoCmp: params.tipoCmp,
+      nroCmp: params.nroCmp,
+      importe: params.importe,
+      moneda: params.moneda,
+      ctz: params.ctz,
+      tipoDocRec: params.tipoDocRec,
+      nroDocRec: String(params.nroDocRec),
+      tipoCodAut: 'E',
+      codAut: params.codAut,
+      url: qrUrl,
+    };
+  }
+
+  /**
+   * Obtiene los tipos de comprobante disponibles para el emisor
+   */
+  async getTiposComprobante(
+    cuitEmisor: string,
+    certificado: string,
+    clavePrivada: string,
+  ): Promise<Array<{ Id: number; Desc: string; FchDesde: string; FchHasta: string }>> {
+    const ticket = await this.getTicket('wsfe', certificado, clavePrivada);
+    const wsfeUrl = this.configService.get<string>('afip.wsfeUrl') || 
+      'https://servicios1.afip.gov.ar/wsfev1/service.asmx?WSDL';
+
+    return new Promise((resolve, reject) => {
+      soap.createClient(wsfeUrl, (err, client) => {
+        if (err) {
+          reject(new BadRequestException(`Error al crear cliente SOAP: ${err.message}`));
+          return;
+        }
+
+        const request = {
+          Auth: {
+            Token: ticket.token,
+            Sign: ticket.sign,
+            Cuit: cuitEmisor.replace(/-/g, ''),
+          },
+        };
+
+        client.FEParamGetTiposCbte(request, (err: any, result: any) => {
+          if (err) {
+            reject(new BadRequestException(`Error al obtener tipos de comprobante: ${err.message}`));
+            return;
+          }
+
+          const tipos = result.FEParamGetTiposCbteResult?.ResultGet?.CbteTipo || [];
+          const tiposArray = Array.isArray(tipos) ? tipos : [tipos];
+          resolve(tiposArray);
+        });
+      });
+    });
+  }
+
+  /**
+   * Obtiene los puntos de venta habilitados para el emisor
+   */
+  async getPuntosVenta(
+    cuitEmisor: string,
+    certificado: string,
+    clavePrivada: string,
+  ): Promise<Array<{ Nro: number; EmisionTipo: string; Bloqueado: string; FchBaja: string }>> {
+    const ticket = await this.getTicket('wsfe', certificado, clavePrivada);
+    const wsfeUrl = this.configService.get<string>('afip.wsfeUrl') || 
+      'https://servicios1.afip.gov.ar/wsfev1/service.asmx?WSDL';
+
+    return new Promise((resolve, reject) => {
+      soap.createClient(wsfeUrl, (err, client) => {
+        if (err) {
+          reject(new BadRequestException(`Error al crear cliente SOAP: ${err.message}`));
+          return;
+        }
+
+        const request = {
+          Auth: {
+            Token: ticket.token,
+            Sign: ticket.sign,
+            Cuit: cuitEmisor.replace(/-/g, ''),
+          },
+        };
+
+        client.FEParamGetPtosVenta(request, (err: any, result: any) => {
+          if (err) {
+            reject(new BadRequestException(`Error al obtener puntos de venta: ${err.message}`));
+            return;
+          }
+
+          const ptos = result.FEParamGetPtosVentaResult?.ResultGet?.PtoVenta || [];
+          const ptosArray = Array.isArray(ptos) ? ptos : [ptos];
+          resolve(ptosArray);
+        });
+      });
+    });
+  }
+
+  /**
+   * Obtiene las condiciones de IVA válidas para el receptor según la clase de comprobante
+   */
+  async getCondicionesIvaReceptor(
+    cuitEmisor: string,
+    certificado: string,
+    clavePrivada: string,
+    claseComprobante?: string, // A, B, C, M
+  ): Promise<Array<{ Id: number; Desc: string; Cmp_Clase: string }>> {
+    const ticket = await this.getTicket('wsfe', certificado, clavePrivada);
+    const wsfeUrl = this.configService.get<string>('afip.wsfeUrl') || 
+      'https://servicios1.afip.gov.ar/wsfev1/service.asmx?WSDL';
+
+    return new Promise((resolve, reject) => {
+      soap.createClient(wsfeUrl, (err, client) => {
+        if (err) {
+          reject(new BadRequestException(`Error al crear cliente SOAP: ${err.message}`));
+          return;
+        }
+
+        const request: any = {
+          Auth: {
+            Token: ticket.token,
+            Sign: ticket.sign,
+            Cuit: cuitEmisor.replace(/-/g, ''),
+          },
+        };
+
+        if (claseComprobante) {
+          request.ClaseCmp = claseComprobante;
+        }
+
+        client.FEParamGetCondicionIvaReceptor(request, (err: any, result: any) => {
+          if (err) {
+            reject(new BadRequestException(`Error al obtener condiciones IVA: ${err.message}`));
+            return;
+          }
+
+          const condiciones = result.FEParamGetCondicionIvaReceptorResult?.ResultGet?.CondicionIvaReceptor || [];
+          const condicionesArray = Array.isArray(condiciones) ? condiciones : [condiciones];
+          resolve(condicionesArray);
+        });
+      });
+    });
   }
 }
 
