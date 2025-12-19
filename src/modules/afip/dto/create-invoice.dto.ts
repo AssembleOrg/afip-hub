@@ -1,6 +1,6 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsString, IsNumber, IsOptional, IsEnum, Min, IsArray, ValidateNested } from 'class-validator';
-import { Type } from 'class-transformer';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsNotEmpty, IsString, IsNumber, IsOptional, IsEnum, Min, IsArray, ValidateNested, IsBoolean } from 'class-validator';
+import { Type, Transform } from 'class-transformer';
 
 /**
  * Tipos de Comprobante según AFIP
@@ -379,6 +379,16 @@ export class CreateInvoiceDto {
   @IsString()
   @IsNotEmpty()
   clavePrivada: string;
+
+  @ApiPropertyOptional({ 
+    description: 'Usar entorno de homologación (true) o producción (false). Default: true (homologación)',
+    example: true,
+    default: true
+  })
+  @IsOptional()
+  @IsBoolean()
+  @Transform(({ value }) => value === 'true' || value === true || value === undefined || value === null)
+  homologacion?: boolean;
 }
 
 /**

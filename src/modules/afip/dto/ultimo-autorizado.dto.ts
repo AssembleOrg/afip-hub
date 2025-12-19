@@ -1,5 +1,6 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsNumber, Min, IsString, IsNotEmpty } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsNumber, Min, IsString, IsNotEmpty, IsOptional, IsBoolean } from 'class-validator';
+import { Type, Transform } from 'class-transformer';
 import { TipoComprobante } from './create-invoice.dto';
 
 export class UltimoAutorizadoDto {
@@ -42,6 +43,16 @@ export class UltimoAutorizadoDto {
   @IsString()
   @IsNotEmpty()
   clavePrivada: string;
+
+  @ApiPropertyOptional({ 
+    description: 'Usar entorno de homologación (true) o producción (false). Default: true (homologación)',
+    example: true,
+    default: true
+  })
+  @IsOptional()
+  @IsBoolean()
+  @Transform(({ value }) => value === 'true' || value === true || value === undefined || value === null)
+  homologacion?: boolean;
 }
 
 export class UltimoAutorizadoResponseDto {

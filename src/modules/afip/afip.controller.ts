@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body } from '@nestjs/common';
+import { Controller, Post, Get, Body, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { AfipService } from './afip.service';
@@ -15,6 +15,30 @@ import {
   CondicionIvaReceptorResponseDto,
   GenerarQrRequestDto,
 } from './dto/afip-params.dto';
+import {
+  ConsultarComunicacionesDto,
+  ConsumirComunicacionDto,
+  ConsultarSistemasPublicadoresDto,
+  ConsultarEstadosDto,
+  ComunicacionesPaginadasResponseDto,
+  ComunicacionDetalleResponseDto,
+  SistemasPublicadoresResponseDto,
+  EstadosComunicacionResponseDto,
+} from './dto/ventanilla-electronica.dto';
+import {
+  ComprobanteConstatarDto,
+  ComprobantesModalidadConsultarDto,
+  ComprobantesTipoConsultarDto,
+  DocumentosTipoConsultarDto,
+  OpcionalesTipoConsultarDto,
+  ComprobanteDummyDto,
+  ComprobanteConstatarResponseDto,
+  ModalidadResponseDto,
+  TipoComprobanteWscdcResponseDto,
+  TipoDocumentoResponseDto,
+  TipoOpcionalResponseDto,
+  DummyResponseDto,
+} from './dto/wscdc.dto';
 import { ResponseDto } from '@/common/dto';
 import { Auditory, Public } from '@/common';
 
@@ -130,10 +154,12 @@ Crea un comprobante electrónico (factura, nota de crédito, nota de débito, et
     try {
       // Obtener ticket primero usando los certificados del request
       const dto = ultimoAutorizadoDto as any;
+      const homologacion = ultimoAutorizadoDto.homologacion !== undefined ? ultimoAutorizadoDto.homologacion : true;
       const ticket = await this.afipService.getTicket(
         'wsfe',
         dto.certificado,
         dto.clavePrivada,
+        homologacion,
       );
       
       const cuitEmisor = dto.cuitEmisor.replace(/-/g, ''); // Remover guiones si los tiene
@@ -145,6 +171,7 @@ Crea un comprobante electrónico (factura, nota de crédito, nota de débito, et
         ultimoAutorizadoDto.tipoComprobante,
         ticket,
         cuitEmisor,
+        homologacion,
       );
 
       const response: UltimoAutorizadoResponseDto = {
@@ -212,10 +239,12 @@ Crea un comprobante electrónico (factura, nota de crédito, nota de débito, et
   async getTiposComprobante(
     @Body() paramsDto: AfipParamsRequestDto,
   ): Promise<ResponseDto<TipoComprobanteResponseDto[]>> {
+    const homologacion = paramsDto.homologacion !== undefined ? paramsDto.homologacion : true;
     const tipos = await this.afipService.getTiposComprobante(
       paramsDto.cuitEmisor,
       paramsDto.certificado,
       paramsDto.clavePrivada,
+      homologacion,
     );
     return new ResponseDto(tipos, 'Tipos de comprobante obtenidos exitosamente');
   }
@@ -235,10 +264,12 @@ Crea un comprobante electrónico (factura, nota de crédito, nota de débito, et
   async getPuntosVenta(
     @Body() paramsDto: AfipParamsRequestDto,
   ): Promise<ResponseDto<PuntoVentaResponseDto[]>> {
+    const homologacion = paramsDto.homologacion !== undefined ? paramsDto.homologacion : true;
     const puntos = await this.afipService.getPuntosVenta(
       paramsDto.cuitEmisor,
       paramsDto.certificado,
       paramsDto.clavePrivada,
+      homologacion,
     );
     return new ResponseDto(puntos, 'Puntos de venta obtenidos exitosamente');
   }
@@ -268,11 +299,13 @@ Si no se especifica la clase, devuelve todas las combinaciones posibles.
   async getCondicionesIva(
     @Body() paramsDto: CondicionesIvaRequestDto,
   ): Promise<ResponseDto<CondicionIvaReceptorResponseDto[]>> {
+    const homologacion = paramsDto.homologacion !== undefined ? paramsDto.homologacion : true;
     const condiciones = await this.afipService.getCondicionesIvaReceptor(
       paramsDto.cuitEmisor,
       paramsDto.certificado,
       paramsDto.clavePrivada,
       paramsDto.claseComprobante,
+      homologacion,
     );
     return new ResponseDto(condiciones, 'Condiciones IVA obtenidas exitosamente');
   }
@@ -341,5 +374,273 @@ Este endpoint no requiere autenticación con AFIP, solo genera los datos del QR.
     };
 
     return new ResponseDto(qrData, 'Datos QR generados exitosamente');
+  }
+
+  // ============================================
+  // VENTANILLA ELECTRÓNICA ENDPOINTS
+  // ============================================
+
+  @Post('ve/comunicaciones')
+  @Auditory('Consultar comunicaciones Ventanilla Electrónica')
+  @ApiOperation({ 
+    summary: 'Consultar comunicaciones de AFIP',
+    description: 'Obtiene las comunicaciones oficiales de AFIP (notificaciones, intimaciones, etc.) de forma paginada.'
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Comunicaciones obtenidas exitosamente',
+    type: ResponseDto<ComunicacionesPaginadasResponseDto>,
+  })
+  @ApiResponse({ status: 400, description: 'Error en la solicitud' })
+  async consultarComunicaciones(
+    @Body() dto: ConsultarComunicacionesDto,
+  ): Promise<ResponseDto<ComunicacionesPaginadasResponseDto>> {
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const result = await this.afipService.consultarComunicaciones(
+      dto.cuitRepresentada,
+      dto.certificado,
+      dto.clavePrivada,
+      dto.filtros,
+      dto.pagina || 1,
+      dto.itemsPorPagina || 20,
+      homologacion,
+    );
+
+    return new ResponseDto(result as ComunicacionesPaginadasResponseDto, 'Comunicaciones obtenidas exitosamente');
+  }
+
+  @Post('ve/comunicacion')
+  @Auditory('Leer comunicación Ventanilla Electrónica')
+  @ApiOperation({ 
+    summary: 'Leer una comunicación específica',
+    description: 'Obtiene el detalle completo de una comunicación incluyendo el cuerpo del mensaje y adjuntos.'
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Comunicación leída exitosamente',
+    type: ResponseDto<ComunicacionDetalleResponseDto>,
+  })
+  @ApiResponse({ status: 400, description: 'Error en la solicitud' })
+  @ApiResponse({ status: 404, description: 'Comunicación no encontrada' })
+  async consumirComunicacion(
+    @Body() dto: ConsumirComunicacionDto,
+  ): Promise<ResponseDto<ComunicacionDetalleResponseDto>> {
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const result = await this.afipService.consumirComunicacion(
+      dto.cuitRepresentada,
+      dto.certificado,
+      dto.clavePrivada,
+      dto.idComunicacion,
+      dto.incluirAdjuntos || false,
+      homologacion,
+    );
+
+    return new ResponseDto(result as ComunicacionDetalleResponseDto, 'Comunicación leída exitosamente');
+  }
+
+  @Post('ve/sistemas-publicadores')
+  @Auditory('Consultar sistemas publicadores VE')
+  @ApiOperation({ 
+    summary: 'Consultar sistemas publicadores',
+    description: 'Obtiene la lista de sistemas que publican comunicaciones en Ventanilla Electrónica (ARCA, DGCL, etc.)'
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Sistemas publicadores obtenidos exitosamente',
+    type: ResponseDto<SistemasPublicadoresResponseDto>,
+  })
+  async consultarSistemasPublicadores(
+    @Body() dto: ConsultarSistemasPublicadoresDto,
+  ): Promise<ResponseDto<SistemasPublicadoresResponseDto>> {
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const sistemas = await this.afipService.consultarSistemasPublicadores(
+      dto.cuitRepresentada,
+      dto.certificado,
+      dto.clavePrivada,
+      dto.idSistemaPublicador,
+      homologacion,
+    );
+
+    return new ResponseDto({ sistemas } as SistemasPublicadoresResponseDto, 'Sistemas publicadores obtenidos exitosamente');
+  }
+
+  @Post('ve/estados')
+  @Auditory('Consultar estados de comunicación VE')
+  @ApiOperation({ 
+    summary: 'Consultar estados de comunicación',
+    description: 'Obtiene los estados posibles para las comunicaciones (No leída, Leída, etc.)'
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Estados obtenidos exitosamente',
+    type: ResponseDto<EstadosComunicacionResponseDto>,
+  })
+  async consultarEstadosComunicacion(
+    @Body() dto: ConsultarEstadosDto,
+  ): Promise<ResponseDto<EstadosComunicacionResponseDto>> {
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const estados = await this.afipService.consultarEstadosComunicacion(
+      dto.cuitRepresentada,
+      dto.certificado,
+      dto.clavePrivada,
+      homologacion,
+    );
+
+    return new ResponseDto({ estados } as EstadosComunicacionResponseDto, 'Estados obtenidos exitosamente');
+  }
+
+  // ============================================
+  // WSCDC (CONSTATACIÓN DE COMPROBANTES) ENDPOINTS
+  // ============================================
+
+  @Post('wscdc/constatar')
+  @Auditory('Constatar comprobante WSCDC')
+  @ApiOperation({ 
+    summary: 'Constatar/verificar un comprobante',
+    description: 'Verifica si un comprobante existe, está autorizado y obtiene sus datos completos (CAE, fechas, importe, estado).'
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Comprobante constatado exitosamente',
+    type: ResponseDto<ComprobanteConstatarResponseDto>,
+  })
+  @ApiResponse({ status: 400, description: 'Error en la solicitud' })
+  async constatarComprobante(
+    @Body() dto: ComprobanteConstatarDto,
+  ): Promise<ResponseDto<ComprobanteConstatarResponseDto>> {
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const result = await this.afipService.constatarComprobante(
+      dto.cuitEmisor,
+      dto.certificado,
+      dto.clavePrivada,
+      dto.puntoVenta,
+      dto.tipoComprobante,
+      dto.numeroComprobante,
+      dto.cuitEmisorComprobante,
+      homologacion,
+    );
+
+    return new ResponseDto(result as ComprobanteConstatarResponseDto, 'Comprobante constatado exitosamente');
+  }
+
+  @Post('wscdc/modalidades')
+  @Auditory('Consultar modalidades de comprobante WSCDC')
+  @ApiOperation({ 
+    summary: 'Consultar modalidades de autorización',
+    description: 'Obtiene las modalidades por las que puede ser autorizado un comprobante (CAE, CAEA, etc.)'
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Modalidades obtenidas exitosamente',
+    type: ResponseDto<ModalidadResponseDto>,
+  })
+  async consultarModalidadesComprobante(
+    @Body() dto: ComprobantesModalidadConsultarDto,
+  ): Promise<ResponseDto<ModalidadResponseDto>> {
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const result = await this.afipService.consultarModalidadesComprobante(
+      dto.cuitEmisor,
+      dto.certificado,
+      dto.clavePrivada,
+      homologacion,
+    );
+
+    return new ResponseDto(result as ModalidadResponseDto, 'Modalidades obtenidas exitosamente');
+  }
+
+  @Post('wscdc/tipos-comprobante')
+  @Auditory('Consultar tipos de comprobante WSCDC')
+  @ApiOperation({ 
+    summary: 'Consultar tipos de comprobante',
+    description: 'Obtiene los tipos de comprobante disponibles con sus códigos y descripciones'
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Tipos de comprobante obtenidos exitosamente',
+    type: ResponseDto<TipoComprobanteWscdcResponseDto>,
+  })
+  async consultarTiposComprobanteWscdc(
+    @Body() dto: ComprobantesTipoConsultarDto,
+  ): Promise<ResponseDto<TipoComprobanteWscdcResponseDto>> {
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const result = await this.afipService.consultarTiposComprobanteWscdc(
+      dto.cuitEmisor,
+      dto.certificado,
+      dto.clavePrivada,
+      homologacion,
+    );
+
+    return new ResponseDto(result as TipoComprobanteWscdcResponseDto, 'Tipos de comprobante obtenidos exitosamente');
+  }
+
+  @Post('wscdc/tipos-documento')
+  @Auditory('Consultar tipos de documento WSCDC')
+  @ApiOperation({ 
+    summary: 'Consultar tipos de documento',
+    description: 'Obtiene los tipos de documento disponibles (CUIT, DNI, etc.)'
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Tipos de documento obtenidos exitosamente',
+    type: ResponseDto<TipoDocumentoResponseDto>,
+  })
+  async consultarTiposDocumento(
+    @Body() dto: DocumentosTipoConsultarDto,
+  ): Promise<ResponseDto<TipoDocumentoResponseDto>> {
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const result = await this.afipService.consultarTiposDocumento(
+      dto.cuitEmisor,
+      dto.certificado,
+      dto.clavePrivada,
+      homologacion,
+    );
+
+    return new ResponseDto(result as TipoDocumentoResponseDto, 'Tipos de documento obtenidos exitosamente');
+  }
+
+  @Post('wscdc/tipos-opcionales')
+  @Auditory('Consultar tipos de datos opcionales WSCDC')
+  @ApiOperation({ 
+    summary: 'Consultar tipos de datos opcionales',
+    description: 'Obtiene los tipos de datos opcionales disponibles (CBU, Alias, etc.)'
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Tipos opcionales obtenidos exitosamente',
+    type: ResponseDto<TipoOpcionalResponseDto>,
+  })
+  async consultarTiposOpcionales(
+    @Body() dto: OpcionalesTipoConsultarDto,
+  ): Promise<ResponseDto<TipoOpcionalResponseDto>> {
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const result = await this.afipService.consultarTiposOpcionales(
+      dto.cuitEmisor,
+      dto.certificado,
+      dto.clavePrivada,
+      homologacion,
+    );
+
+    return new ResponseDto(result as TipoOpcionalResponseDto, 'Tipos opcionales obtenidos exitosamente');
+  }
+
+  @Get('wscdc/dummy')
+  @Auditory('Comprobante Dummy WSCDC')
+  @ApiOperation({ 
+    summary: 'Verificar funcionamiento de infraestructura',
+    description: 'Método Dummy para verificar el estado de los servidores (no requiere autenticación). Por defecto usa homologación.'
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Estado de infraestructura obtenido exitosamente',
+    type: ResponseDto<DummyResponseDto>,
+  })
+  async comprobanteDummy(
+    @Query('homologacion') homologacion?: string,
+  ): Promise<ResponseDto<DummyResponseDto>> {
+    // Convertir query param a boolean (default: true)
+    const useHomologacion = homologacion === undefined || homologacion === 'true' || homologacion === '';
+    const result = await this.afipService.comprobanteDummy(useHomologacion);
+
+    return new ResponseDto(result as DummyResponseDto, 'Estado de infraestructura obtenido exitosamente');
   }
 }

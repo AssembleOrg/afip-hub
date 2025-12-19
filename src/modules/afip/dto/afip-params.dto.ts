@@ -1,5 +1,6 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsString, IsOptional, IsEnum } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsNotEmpty, IsString, IsOptional, IsEnum, IsBoolean } from 'class-validator';
+import { Type, Transform } from 'class-transformer';
 
 /**
  * DTO para consultar parámetros de AFIP
@@ -29,6 +30,16 @@ export class AfipParamsRequestDto {
   @IsString()
   @IsNotEmpty()
   clavePrivada: string;
+
+  @ApiPropertyOptional({ 
+    description: 'Usar entorno de homologación (true) o producción (false). Default: true (homologación)',
+    example: true,
+    default: true
+  })
+  @IsOptional()
+  @IsBoolean()
+  @Transform(({ value }) => value === 'true' || value === true || value === undefined || value === null)
+  homologacion?: boolean;
 }
 
 /**
@@ -138,4 +149,6 @@ export class GenerarQrRequestDto {
   @IsNotEmpty()
   cae: string;
 }
+
+
 

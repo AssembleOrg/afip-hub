@@ -1,5 +1,6 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsString } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsNotEmpty, IsString, IsOptional, IsBoolean } from 'class-validator';
+import { Transform } from 'class-transformer';
 
 export class ConsultarContribuyenteDto {
   @ApiProperty({ 
@@ -35,6 +36,16 @@ export class ConsultarContribuyenteDto {
   @IsString()
   @IsNotEmpty()
   clavePrivada: string;
+
+  @ApiPropertyOptional({ 
+    description: 'Usar entorno de homologación (true) o producción (false). Default: true (homologación)',
+    example: true,
+    default: true
+  })
+  @IsOptional()
+  @IsBoolean()
+  @Transform(({ value }) => value === 'true' || value === true || value === undefined || value === null)
+  homologacion?: boolean;
 }
 
 export class ContribuyenteResponseDto {

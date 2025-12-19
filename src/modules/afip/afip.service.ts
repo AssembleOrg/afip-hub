@@ -23,9 +23,44 @@ export class AfipService {
   private readonly logger = new Logger(AfipService.name);
   private wsaaUrl: string;
 
+  // URLs por defecto según entorno
+  private readonly AFIP_URLS = {
+    production: {
+      wsaa: 'https://wsaa.afip.gov.ar/ws/services/LoginCms?WSDL',
+      wsfe: 'https://servicios1.afip.gov.ar/wsfev1/service.asmx?WSDL',
+      padron: 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA5?WSDL',
+      ventanilla: 'https://infraestructura.afip.gob.ar/ve-ws/services/veconsumer?wsdl',
+      wscdc: 'https://servicios1.arca.gov.ar/WSCDC/service.asmx?WSDL',
+    },
+    homologacion: {
+      wsaa: 'https://wsaahomo.afip.gov.ar/ws/services/LoginCms?WSDL',
+      wsfe: 'https://wswhomo.afip.gov.ar/wsfev1/service.asmx?WSDL',
+      padron: 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA5?WSDL',
+      ventanilla: 'https://stable-middleware-tecno-ext.afip.gob.ar/ve-ws/services/veconsumer?wsdl',
+      wscdc: 'https://wswhomo.arca.gov.ar/WSCDC/service.asmx?WSDL',
+    },
+  };
+
   constructor(private configService: ConfigService) {
     this.wsaaUrl = this.configService.get<string>('afip.wsaaUrl') || '';
- 
+  }
+
+  /**
+   * Obtiene las URLs de AFIP según el parámetro homologacion
+   * @param homologacion - true para homologación, false para producción. Default: true
+   * @returns URLs del entorno seleccionado
+   */
+  private getAfipUrls(homologacion: boolean = true) {
+    const env = homologacion ? 'homologacion' : 'production';
+    const defaultUrls = this.AFIP_URLS[env];
+    
+    return {
+      wsaa: this.configService.get<string>('afip.wsaaUrl') || defaultUrls.wsaa,
+      wsfe: this.configService.get<string>('afip.wsfeUrl') || defaultUrls.wsfe,
+      padron: this.configService.get<string>('afip.padronUrl') || defaultUrls.padron,
+      ventanilla: this.configService.get<string>('afip.ventanillaUrl') || defaultUrls.ventanilla,
+      wscdc: this.configService.get<string>('afip.wscdcUrl') || defaultUrls.wscdc,
+    };
   }
 
   /**
@@ -56,10 +91,12 @@ export class AfipService {
     service: string,
     certificado: string,
     clavePrivada: string,
+    homologacion: boolean = true,
   ): Promise<AfipTicketDto> {
     try {
       this.logger.log(`=== INICIO OBTENCIÓN DE TICKET ===`);
       this.logger.log(`Servicio solicitado: ${service}`);
+      this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
       // Paso 1: Crear el TRA (Ticket de Requerimiento de Acceso)
       // Es un XML que contiene la solicitud de acceso al servicio
@@ -76,7 +113,8 @@ export class AfipService {
       // Paso 3: Llamar al servicio WSAA para obtener el TA
       // WSAA valida la firma y devuelve un Ticket de Acceso válido
       this.logger.log('Llamando a WSAA...');
-      const ticket = await this.callWSAA(signedTra);
+      const urls = this.getAfipUrls(homologacion);
+      const ticket = await this.callWSAA(signedTra, urls.wsaa);
 
       this.logger.log(`=== TICKET OBTENIDO ===`);
       this.logger.log(`Token (primeros 50 caracteres): ${ticket.token.substring(0, 50)}...`);
@@ -231,14 +269,13 @@ export class AfipService {
   /**
    * Llama al servicio WSAA para obtener el Ticket de Acceso
    */
-  private async callWSAA(signedTra: string): Promise<AfipTicketDto> {
+  private async callWSAA(signedTra: string, wsaaUrl?: string): Promise<AfipTicketDto> {
     return new Promise((resolve, reject) => {
-      // Asegurar que la URL termine con ?WSDL
-      const wsaaUrl = this.wsaaUrl.includes('?WSDL') 
-        ? this.wsaaUrl 
-        : `${this.wsaaUrl}?WSDL`;
+      // Usar la URL proporcionada o la del config, asegurando que termine con ?WSDL
+      const url = wsaaUrl || this.wsaaUrl;
+      const finalUrl = url.includes('?WSDL') ? url : `${url}?WSDL`;
 
-      this.logger.log(`Conectando a WSAA: ${wsaaUrl}`);
+      this.logger.log(`Conectando a WSAA: ${finalUrl}`);
 
       // Opciones para el cliente SOAP de AFIP
       const soapOptions = {
@@ -253,12 +290,12 @@ export class AfipService {
       };
 
       soap.createClient(
-        wsaaUrl,
+        finalUrl,
         soapOptions,
         (err, client) => {
           if (err) {
             this.logger.error(`Error al crear cliente SOAP: ${err.message}`);
-            reject(new Error(`Error al crear cliente SOAP: ${err.message}. URL: ${wsaaUrl}`));
+            reject(new Error(`Error al crear cliente SOAP: ${err.message}. URL: ${finalUrl}`));
             return;
           }
 
@@ -378,17 +415,18 @@ export class AfipService {
     tipoComprobante: number,
     ticket: AfipTicketDto,
     cuit: string,
+    homologacion: boolean = true,
   ): Promise<{ CbteNro: number; CbteFch: string }> {
     this.logger.log('=== INICIO getUltimoAutorizado ===');
     this.logger.log(`Punto de venta: ${puntoVenta}`);
     this.logger.log(`Tipo de comprobante: ${tipoComprobante}`);
     this.logger.log(`CUIT: ${cuit}`);
+    this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
     this.logger.log(`Ticket: ${JSON.stringify(ticket, null, 2)}`);
 
     return new Promise((resolve, reject) => {
-      const wsfeUrl =
-        this.configService.get<string>('afip.wsfeUrl') ||
-        'https://servicios1.afip.gov.ar/wsfev1/service.asmx?WSDL';
+      const urls = this.getAfipUrls(homologacion);
+      const wsfeUrl = urls.wsfe;
 
       this.logger.log(
         `Llamando FECompUltimoAutorizado PtoVta=${puntoVenta}, CbteTipo=${tipoComprobante}, CUIT=${cuit}`,
@@ -571,17 +609,18 @@ export class AfipService {
       }
 
       const cuitEmisor = cuitEmisorRaw.replace(/-/g, ''); // Remover guiones
+      const homologacion = consultaDto.homologacion !== undefined ? consultaDto.homologacion : true;
 
       // Obtener ticket del servicio de Constancia de Inscripción
       // ID del servicio según manual v3.4: ws_sr_constancia_inscripcion
       this.logger.log('Obteniendo ticket del servicio ws_sr_constancia_inscripcion...');
-      const ticket = await this.getTicket('ws_sr_constancia_inscripcion', certificado, clavePrivada);
+      const ticket = await this.getTicket('ws_sr_constancia_inscripcion', certificado, clavePrivada, homologacion);
       this.logger.log(`Ticket obtenido, válido hasta: ${ticket.expirationTime}`);
 
       // URL del servicio de Constancia de Inscripción
       // Según manual v3.4: usa personaServiceA5 (aunque el servicio se llama ws_sr_constancia_inscripcion)
-      const padronUrl = this.configService.get<string>('afip.padronUrl') || 
-        'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA5?WSDL';
+      const urls = this.getAfipUrls(homologacion);
+      const padronUrl = urls.padron;
 
       this.logger.log(`URL Constancia de Inscripción: ${padronUrl}`);
 
@@ -860,7 +899,9 @@ export class AfipService {
       }
 
       const cuitEmisor = cuitEmisorRaw.replace(/-/g, ''); // Remover guiones si los tiene
+      const homologacion = invoiceData.homologacion !== undefined ? invoiceData.homologacion : true;
       this.logger.log(`CUIT Emisor: ${cuitEmisor}`);
+      this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
       // Si no se proporciona ticket, obtener uno nuevo usando los certificados del request
       let authTicket = ticket;
@@ -870,6 +911,7 @@ export class AfipService {
           'wsfe',
           certificado,
           clavePrivada,
+          homologacion,
         );
         this.logger.log(`Ticket obtenido, válido hasta: ${authTicket.expirationTime}`);
       } else {
@@ -877,8 +919,8 @@ export class AfipService {
       }
 
       // URL del servicio WSFE (Facturación Electrónica)
-      const wsfeUrl = this.configService.get<string>('afip.wsfeUrl') || 
-        'https://servicios1.afip.gov.ar/wsfev1/service.asmx?WSDL';
+      const urls = this.getAfipUrls(homologacion);
+      const wsfeUrl = urls.wsfe;
 
       this.logger.log(`URL WSFE: ${wsfeUrl}`);
 
@@ -892,6 +934,7 @@ export class AfipService {
           invoiceData.tipoComprobante,
           authTicket,
           cuitEmisor,
+          homologacion,
         );
       } catch (error: any) {
         this.logger.error('=== ERROR EN getUltimoAutorizado ===');
@@ -1465,10 +1508,11 @@ export class AfipService {
     cuitEmisor: string,
     certificado: string,
     clavePrivada: string,
+    homologacion: boolean = true,
   ): Promise<Array<{ Id: number; Desc: string; FchDesde: string; FchHasta: string }>> {
-    const ticket = await this.getTicket('wsfe', certificado, clavePrivada);
-    const wsfeUrl = this.configService.get<string>('afip.wsfeUrl') || 
-      'https://servicios1.afip.gov.ar/wsfev1/service.asmx?WSDL';
+    const ticket = await this.getTicket('wsfe', certificado, clavePrivada, homologacion);
+    const urls = this.getAfipUrls(homologacion);
+    const wsfeUrl = urls.wsfe;
 
     return new Promise((resolve, reject) => {
       soap.createClient(wsfeUrl, (err, client) => {
@@ -1506,10 +1550,11 @@ export class AfipService {
     cuitEmisor: string,
     certificado: string,
     clavePrivada: string,
+    homologacion: boolean = true,
   ): Promise<Array<{ Nro: number; EmisionTipo: string; Bloqueado: string; FchBaja: string }>> {
-    const ticket = await this.getTicket('wsfe', certificado, clavePrivada);
-    const wsfeUrl = this.configService.get<string>('afip.wsfeUrl') || 
-      'https://servicios1.afip.gov.ar/wsfev1/service.asmx?WSDL';
+    const ticket = await this.getTicket('wsfe', certificado, clavePrivada, homologacion);
+    const urls = this.getAfipUrls(homologacion);
+    const wsfeUrl = urls.wsfe;
 
     return new Promise((resolve, reject) => {
       soap.createClient(wsfeUrl, (err, client) => {
@@ -1548,10 +1593,11 @@ export class AfipService {
     certificado: string,
     clavePrivada: string,
     claseComprobante?: string, // A, B, C, M
+    homologacion: boolean = true,
   ): Promise<Array<{ Id: number; Desc: string; Cmp_Clase: string }>> {
-    const ticket = await this.getTicket('wsfe', certificado, clavePrivada);
-    const wsfeUrl = this.configService.get<string>('afip.wsfeUrl') || 
-      'https://servicios1.afip.gov.ar/wsfev1/service.asmx?WSDL';
+    const ticket = await this.getTicket('wsfe', certificado, clavePrivada, homologacion);
+    const urls = this.getAfipUrls(homologacion);
+    const wsfeUrl = urls.wsfe;
 
     return new Promise((resolve, reject) => {
       soap.createClient(wsfeUrl, (err, client) => {
@@ -1581,6 +1627,993 @@ export class AfipService {
           const condiciones = result.FEParamGetCondicionIvaReceptorResult?.ResultGet?.CondicionIvaReceptor || [];
           const condicionesArray = Array.isArray(condiciones) ? condiciones : [condiciones];
           resolve(condicionesArray);
+        });
+      });
+    });
+  }
+
+  // ============================================
+  // VENTANILLA ELECTRÓNICA (VE) SERVICE METHODS
+  // ============================================
+
+  /**
+   * Consulta las comunicaciones de la Ventanilla Electrónica de AFIP
+   * 
+   * @param cuitRepresentada - CUIT del contribuyente
+   * @param certificado - Certificado en formato PEM
+   * @param clavePrivada - Clave privada en formato PEM
+   * @param filtros - Filtros opcionales (estado, fechas, sistema publicador)
+   * @param pagina - Número de página (1-based)
+   * @param itemsPorPagina - Items por página (máx 50)
+   * 
+   * @returns Comunicaciones paginadas
+   */
+  async consultarComunicaciones(
+    cuitRepresentada: string,
+    certificado: string,
+    clavePrivada: string,
+    filtros?: {
+      estado?: number;
+      fechaDesde?: string;
+      fechaHasta?: string;
+      idSistemaPublicador?: number;
+      idComunicacionDesde?: number;
+      idComunicacionHasta?: number;
+    },
+    pagina: number = 1,
+    itemsPorPagina: number = 20,
+    homologacion: boolean = true,
+  ): Promise<{
+    paginacion: {
+      pagina: number;
+      totalPaginas: number;
+      itemsPorPagina: number;
+      totalItems: number;
+    };
+    comunicaciones: Array<{
+      idComunicacion: number;
+      cuitDestinatario: string;
+      fechaPublicacion: string;
+      fechaVencimiento?: string;
+      sistemaPublicador: number;
+      sistemaPublicadorDesc: string;
+      estado: number;
+      estadoDesc: string;
+      asunto: string;
+      prioridad?: number;
+      tieneAdjunto: boolean;
+      referencia1?: string;
+      referencia2?: string;
+    }>;
+  }> {
+    this.logger.log('=== CONSULTANDO COMUNICACIONES VENTANILLA ELECTRÓNICA ===');
+    this.logger.log(`CUIT Representada: ${cuitRepresentada}`);
+    this.logger.log(`Página: ${pagina}, Items por página: ${itemsPorPagina}`);
+    this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
+    if (filtros) {
+      this.logger.log(`Filtros: ${JSON.stringify(filtros)}`);
+    }
+
+    // Obtener ticket para el servicio veconsumerws
+    const ticket = await this.getTicket('veconsumerws', certificado, clavePrivada, homologacion);
+    
+    const urls = this.getAfipUrls(homologacion);
+    const ventanillaUrl = urls.ventanilla;
+
+    return new Promise((resolve, reject) => {
+      soap.createClient(ventanillaUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
+        if (err) {
+          this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
+          reject(new BadRequestException(`Error al crear cliente SOAP Ventanilla Electrónica: ${err.message}`));
+          return;
+        }
+
+        // Construir el request según la especificación del PDF
+        const request: any = {
+          authRequest: {
+            token: ticket.token,
+            sign: ticket.sign,
+            cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
+          },
+          pagina: pagina,
+          itemsPorPagina: itemsPorPagina,
+        };
+
+        // Agregar filtros si existen
+        if (filtros) {
+          request.filter = {};
+          
+          if (filtros.estado !== undefined) {
+            request.filter.estado = filtros.estado;
+          }
+          if (filtros.fechaDesde) {
+            // Formato esperado: yyyy-MM-dd
+            request.filter.fechaDesde = filtros.fechaDesde;
+          }
+          if (filtros.fechaHasta) {
+            request.filter.fechaHasta = filtros.fechaHasta;
+          }
+          if (filtros.idSistemaPublicador !== undefined) {
+            request.filter.idSistemaPublicador = filtros.idSistemaPublicador;
+          }
+          if (filtros.idComunicacionDesde !== undefined) {
+            request.filter.idComunicacionDesde = filtros.idComunicacionDesde;
+          }
+          if (filtros.idComunicacionHasta !== undefined) {
+            request.filter.idComunicacionHasta = filtros.idComunicacionHasta;
+          }
+        }
+
+        this.logger.log('Request a VE: ' + JSON.stringify(request, null, 2));
+
+        client.consultarComunicaciones(request, (err: any, result: any) => {
+          if (err) {
+            this.logger.error(`Error en consultarComunicaciones: ${err.message}`);
+            reject(new BadRequestException(`Error al consultar comunicaciones: ${err.message}`));
+            return;
+          }
+
+          try {
+            this.logger.log('Respuesta recibida de VE');
+            
+            // Parsear respuesta según estructura del PDF
+            const respuestaPaginada = result?.consultarComunicacionesResponse?.RespuestaPaginada || 
+                                     result?.RespuestaPaginada || 
+                                     result;
+
+            const items = respuestaPaginada?.items?.item || respuestaPaginada?.items || [];
+            const comunicacionesArray = Array.isArray(items) ? items : (items ? [items] : []);
+
+            // Mapear las comunicaciones al formato de respuesta
+            const comunicaciones = comunicacionesArray.map((c: any) => ({
+              idComunicacion: Number(c.idComunicacion || c.id),
+              cuitDestinatario: String(c.cuitDestinatario || cuitRepresentada),
+              fechaPublicacion: c.fechaPublicacion || '',
+              fechaVencimiento: c.fechaVencimiento || undefined,
+              sistemaPublicador: Number(c.sistemaPublicador || c.idSistemaPublicador || 0),
+              sistemaPublicadorDesc: c.sistemaPublicadorDesc || c.descSistemaPublicador || '',
+              estado: Number(c.estado || 1),
+              estadoDesc: c.estadoDesc || this.getEstadoDescripcion(Number(c.estado || 1)),
+              asunto: c.asunto || '',
+              prioridad: c.prioridad ? Number(c.prioridad) : undefined,
+              tieneAdjunto: c.tieneAdjunto === true || c.tieneAdjunto === 'true' || c.tieneAdjunto === 1,
+              referencia1: c.referencia1 || undefined,
+              referencia2: c.referencia2 || undefined,
+            }));
+
+            const response = {
+              paginacion: {
+                pagina: Number(respuestaPaginada?.pagina || pagina),
+                totalPaginas: Number(respuestaPaginada?.totalPaginas || 1),
+                itemsPorPagina: Number(respuestaPaginada?.itemsPorPagina || itemsPorPagina),
+                totalItems: Number(respuestaPaginada?.totalItems || comunicaciones.length),
+              },
+              comunicaciones,
+            };
+
+            this.logger.log(`Comunicaciones encontradas: ${response.paginacion.totalItems}`);
+            resolve(response);
+          } catch (parseError: any) {
+            this.logger.error(`Error al parsear respuesta VE: ${parseError.message}`);
+            reject(new BadRequestException(`Error al procesar respuesta de Ventanilla Electrónica: ${parseError.message}`));
+          }
+        });
+      });
+    });
+  }
+
+  /**
+   * Consume/lee una comunicación específica de la Ventanilla Electrónica
+   * 
+   * @param cuitRepresentada - CUIT del contribuyente
+   * @param certificado - Certificado en formato PEM
+   * @param clavePrivada - Clave privada en formato PEM
+   * @param idComunicacion - ID de la comunicación a leer
+   * @param incluirAdjuntos - Si se incluyen los adjuntos en base64
+   * 
+   * @returns Detalle de la comunicación
+   */
+  async consumirComunicacion(
+    cuitRepresentada: string,
+    certificado: string,
+    clavePrivada: string,
+    idComunicacion: number,
+    incluirAdjuntos: boolean = false,
+    homologacion: boolean = true,
+  ): Promise<{
+    idComunicacion: number;
+    cuitDestinatario: string;
+    fechaPublicacion: string;
+    fechaVencimiento?: string;
+    sistemaPublicador: number;
+    sistemaPublicadorDesc: string;
+    estado: number;
+    estadoDesc: string;
+    asunto: string;
+    prioridad?: number;
+    tieneAdjunto: boolean;
+    referencia1?: string;
+    referencia2?: string;
+    cuerpo?: string;
+    adjuntos?: Array<{
+      nombre: string;
+      tipoMime: string;
+      contenidoBase64?: string;
+      tamanio?: number;
+    }>;
+    fechaLectura?: string;
+  }> {
+    this.logger.log('=== CONSUMIENDO COMUNICACIÓN VENTANILLA ELECTRÓNICA ===');
+    this.logger.log(`CUIT Representada: ${cuitRepresentada}`);
+    this.logger.log(`ID Comunicación: ${idComunicacion}`);
+    this.logger.log(`Incluir Adjuntos: ${incluirAdjuntos}`);
+    this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
+
+    const ticket = await this.getTicket('veconsumerws', certificado, clavePrivada, homologacion);
+    
+    const urls = this.getAfipUrls(homologacion);
+    const ventanillaUrl = urls.ventanilla;
+
+    return new Promise((resolve, reject) => {
+      soap.createClient(ventanillaUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
+        if (err) {
+          this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
+          reject(new BadRequestException(`Error al crear cliente SOAP Ventanilla Electrónica: ${err.message}`));
+          return;
+        }
+
+        const request: any = {
+          authRequest: {
+            token: ticket.token,
+            sign: ticket.sign,
+            cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
+          },
+          idComunicacion: idComunicacion,
+        };
+
+        this.logger.log('Request a VE consumirComunicacion: ' + JSON.stringify(request, null, 2));
+
+        client.consumirComunicacion(request, (err: any, result: any) => {
+          if (err) {
+            this.logger.error(`Error en consumirComunicacion: ${err.message}`);
+            reject(new BadRequestException(`Error al consumir comunicación: ${err.message}`));
+            return;
+          }
+
+          try {
+            this.logger.log('Respuesta recibida de VE (consumirComunicacion)');
+            
+            const comunicacion = result?.consumirComunicacionResponse?.Comunicacion || 
+                               result?.Comunicacion || 
+                               result;
+
+            // Parsear adjuntos si existen
+            let adjuntos: any[] = [];
+            if (comunicacion.adjuntos?.adjunto) {
+              const adjuntosData = Array.isArray(comunicacion.adjuntos.adjunto) 
+                ? comunicacion.adjuntos.adjunto 
+                : [comunicacion.adjuntos.adjunto];
+              
+              adjuntos = adjuntosData.map((adj: any) => ({
+                nombre: adj.nombre || adj.fileName || '',
+                tipoMime: adj.tipoMime || adj.mimeType || 'application/octet-stream',
+                contenidoBase64: incluirAdjuntos ? (adj.contenido || adj.content || '') : undefined,
+                tamanio: adj.tamanio ? Number(adj.tamanio) : undefined,
+              }));
+            }
+
+            const response = {
+              idComunicacion: Number(comunicacion.idComunicacion || comunicacion.id || idComunicacion),
+              cuitDestinatario: String(comunicacion.cuitDestinatario || cuitRepresentada),
+              fechaPublicacion: comunicacion.fechaPublicacion || '',
+              fechaVencimiento: comunicacion.fechaVencimiento || undefined,
+              sistemaPublicador: Number(comunicacion.sistemaPublicador || comunicacion.idSistemaPublicador || 0),
+              sistemaPublicadorDesc: comunicacion.sistemaPublicadorDesc || comunicacion.descSistemaPublicador || '',
+              estado: Number(comunicacion.estado || 2), // 2 = Leída (ya que la estamos consumiendo)
+              estadoDesc: comunicacion.estadoDesc || this.getEstadoDescripcion(Number(comunicacion.estado || 2)),
+              asunto: comunicacion.asunto || '',
+              prioridad: comunicacion.prioridad ? Number(comunicacion.prioridad) : undefined,
+              tieneAdjunto: adjuntos.length > 0 || comunicacion.tieneAdjunto === true,
+              referencia1: comunicacion.referencia1 || undefined,
+              referencia2: comunicacion.referencia2 || undefined,
+              cuerpo: comunicacion.cuerpo || comunicacion.mensaje || comunicacion.body || '',
+              adjuntos: adjuntos.length > 0 ? adjuntos : undefined,
+              fechaLectura: comunicacion.fechaLectura || new Date().toISOString(),
+            };
+
+            this.logger.log(`Comunicación leída exitosamente: ${response.idComunicacion}`);
+            resolve(response);
+          } catch (parseError: any) {
+            this.logger.error(`Error al parsear comunicación: ${parseError.message}`);
+            reject(new BadRequestException(`Error al procesar comunicación: ${parseError.message}`));
+          }
+        });
+      });
+    });
+  }
+
+  /**
+   * Consulta los sistemas publicadores disponibles en Ventanilla Electrónica
+   */
+  async consultarSistemasPublicadores(
+    cuitRepresentada: string,
+    certificado: string,
+    clavePrivada: string,
+    idSistemaPublicador?: number,
+    homologacion: boolean = true,
+  ): Promise<Array<{
+    id: number;
+    descripcion: string;
+    certCN?: string;
+    subservicios?: string[];
+  }>> {
+    this.logger.log('=== CONSULTANDO SISTEMAS PUBLICADORES VE ===');
+    this.logger.log(`CUIT Representada: ${cuitRepresentada}`);
+    this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
+
+    const ticket = await this.getTicket('veconsumerws', certificado, clavePrivada, homologacion);
+    
+    const urls = this.getAfipUrls(homologacion);
+    const ventanillaUrl = urls.ventanilla;
+
+    return new Promise((resolve, reject) => {
+      soap.createClient(ventanillaUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
+        if (err) {
+          this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
+          reject(new BadRequestException(`Error al crear cliente SOAP VE: ${err.message}`));
+          return;
+        }
+
+        const request: any = {
+          authRequest: {
+            token: ticket.token,
+            sign: ticket.sign,
+            cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
+          },
+        };
+
+        if (idSistemaPublicador !== undefined) {
+          request.idSistemaPublicador = idSistemaPublicador;
+        }
+
+        client.consultarSistemasPublicadores(request, (err: any, result: any) => {
+          if (err) {
+            this.logger.error(`Error en consultarSistemasPublicadores: ${err.message}`);
+            reject(new BadRequestException(`Error al consultar sistemas publicadores: ${err.message}`));
+            return;
+          }
+
+          try {
+            const sistemas = result?.consultarSistemasPublicadoresResponse?.Sistemas?.Sistema ||
+                           result?.Sistemas?.Sistema ||
+                           [];
+            const sistemasArray = Array.isArray(sistemas) ? sistemas : (sistemas ? [sistemas] : []);
+
+            const response = sistemasArray.map((s: any) => ({
+              id: Number(s.id),
+              descripcion: s.descripcion || '',
+              certCN: s.certCN || undefined,
+              subservicios: s.subservicios?.subservicio || undefined,
+            }));
+
+            this.logger.log(`Sistemas publicadores encontrados: ${response.length}`);
+            resolve(response);
+          } catch (parseError: any) {
+            this.logger.error(`Error al parsear sistemas publicadores: ${parseError.message}`);
+            reject(new BadRequestException(`Error al procesar sistemas publicadores: ${parseError.message}`));
+          }
+        });
+      });
+    });
+  }
+
+  /**
+   * Consulta los estados disponibles para comunicaciones
+   */
+  async consultarEstadosComunicacion(
+    cuitRepresentada: string,
+    certificado: string,
+    clavePrivada: string,
+    homologacion: boolean = true,
+  ): Promise<Array<{
+    codigo: number;
+    descripcion: string;
+  }>> {
+    this.logger.log('=== CONSULTANDO ESTADOS DE COMUNICACIÓN VE ===');
+    this.logger.log(`CUIT Representada: ${cuitRepresentada}`);
+    this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
+
+    const ticket = await this.getTicket('veconsumerws', certificado, clavePrivada, homologacion);
+    
+    const urls = this.getAfipUrls(homologacion);
+    const ventanillaUrl = urls.ventanilla;
+
+    return new Promise((resolve, reject) => {
+      soap.createClient(ventanillaUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
+        if (err) {
+          this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
+          reject(new BadRequestException(`Error al crear cliente SOAP VE: ${err.message}`));
+          return;
+        }
+
+        const request = {
+          authRequest: {
+            token: ticket.token,
+            sign: ticket.sign,
+            cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
+          },
+        };
+
+        client.consultarEstados(request, (err: any, result: any) => {
+          if (err) {
+            this.logger.error(`Error en consultarEstados: ${err.message}`);
+            reject(new BadRequestException(`Error al consultar estados: ${err.message}`));
+            return;
+          }
+
+          try {
+            const estados = result?.consultarEstadosResponse?.Estados?.Estado ||
+                          result?.Estados?.Estado ||
+                          [];
+            const estadosArray = Array.isArray(estados) ? estados : (estados ? [estados] : []);
+
+            const response = estadosArray.map((e: any) => ({
+              codigo: Number(e.id || e.codigo),
+              descripcion: e.descripcion || '',
+            }));
+
+            // Si no hay estados del servicio, devolver los estándar
+            if (response.length === 0) {
+              resolve([
+                { codigo: 1, descripcion: 'No leída' },
+                { codigo: 2, descripcion: 'Leída' },
+              ]);
+              return;
+            }
+
+            this.logger.log(`Estados encontrados: ${response.length}`);
+            resolve(response);
+          } catch (parseError: any) {
+            this.logger.error(`Error al parsear estados: ${parseError.message}`);
+            reject(new BadRequestException(`Error al procesar estados: ${parseError.message}`));
+          }
+        });
+      });
+    });
+  }
+
+  /**
+   * Helper para obtener descripción de estado
+   */
+  private getEstadoDescripcion(estado: number): string {
+    const estados: { [key: number]: string } = {
+      1: 'No leída',
+      2: 'Leída',
+    };
+    return estados[estado] || `Estado ${estado}`;
+  }
+
+  // ============================================
+  // WSCDC (CONSTATACIÓN DE COMPROBANTES) METHODS
+  // ============================================
+
+  /**
+   * Constata/verifica un comprobante específico
+   * 
+   * @param cuitEmisor - CUIT del emisor
+   * @param certificado - Certificado en formato PEM
+   * @param clavePrivada - Clave privada en formato PEM
+   * @param puntoVenta - Punto de venta
+   * @param tipoComprobante - Tipo de comprobante
+   * @param numeroComprobante - Número de comprobante
+   * @param cuitEmisorComprobante - CUIT del emisor del comprobante (opcional, para verificar comprobantes de terceros)
+   * 
+   * @returns Resultado de la constatación
+   */
+  async constatarComprobante(
+    cuitEmisor: string,
+    certificado: string,
+    clavePrivada: string,
+    puntoVenta: number,
+    tipoComprobante: number,
+    numeroComprobante: number,
+    cuitEmisorComprobante?: string,
+    homologacion: boolean = true,
+  ): Promise<{
+    resultado: string;
+    codigoAutorizacion?: string;
+    fechaEmision?: string;
+    fechaVencimiento?: string;
+    importeTotal?: number;
+    estado?: string;
+    puntoVenta: number;
+    tipoComprobante: number;
+    numeroComprobante: number;
+    cuitEmisor: string;
+    cuitReceptor?: string;
+    errors?: Array<{ code: number; msg: string }>;
+    events?: Array<{ code: number; msg: string }>;
+  }> {
+    this.logger.log('=== CONSTATANDO COMPROBANTE WSCDC ===');
+    this.logger.log(`CUIT Emisor: ${cuitEmisor}`);
+    this.logger.log(`Punto Venta: ${puntoVenta}, Tipo: ${tipoComprobante}, Nro: ${numeroComprobante}`);
+    this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
+    if (cuitEmisorComprobante) {
+      this.logger.log(`CUIT Emisor Comprobante: ${cuitEmisorComprobante}`);
+    }
+
+    const ticket = await this.getTicket('wscdc', certificado, clavePrivada, homologacion);
+    
+    const urls = this.getAfipUrls(homologacion);
+    const wscdcUrl = urls.wscdc;
+
+    return new Promise((resolve, reject) => {
+      soap.createClient(wscdcUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
+        if (err) {
+          this.logger.error(`Error al crear cliente SOAP WSCDC: ${err.message}`);
+          reject(new BadRequestException(`Error al crear cliente SOAP WSCDC: ${err.message}`));
+          return;
+        }
+
+        const request: any = {
+          auth: {
+            token: ticket.token,
+            sign: ticket.sign,
+            cuit: cuitEmisor.replace(/-/g, ''),
+          },
+          puntoVenta: puntoVenta,
+          tipoComprobante: tipoComprobante,
+          numeroComprobante: numeroComprobante,
+        };
+
+        if (cuitEmisorComprobante) {
+          request.cuitEmisorComprobante = cuitEmisorComprobante.replace(/-/g, '');
+        }
+
+        this.logger.log('Request a WSCDC ComprobanteConstatar: ' + JSON.stringify(request, null, 2));
+
+        client.ComprobanteConstatar(request, (err: any, result: any) => {
+          if (err) {
+            this.logger.error(`Error en ComprobanteConstatar: ${err.message}`);
+            reject(new BadRequestException(`Error al constatar comprobante: ${err.message}`));
+            return;
+          }
+
+          try {
+            this.logger.log('Respuesta recibida de WSCDC (ComprobanteConstatar)');
+            this.logger.log(JSON.stringify(result, null, 2));
+
+            const responseData = result?.ComprobanteConstatarResult || result?.Result || result;
+            
+            // Parsear errores
+            let errors: Array<{ code: number; msg: string }> = [];
+            if (responseData.Errors?.Err) {
+              const errArray = Array.isArray(responseData.Errors.Err) 
+                ? responseData.Errors.Err 
+                : [responseData.Errors.Err];
+              errors = errArray.map((e: any) => ({
+                code: Number(e.Code || e.code),
+                msg: e.Msg || e.msg || '',
+              }));
+            }
+
+            // Parsear eventos
+            let events: Array<{ code: number; msg: string }> = [];
+            if (responseData.Events?.Evt) {
+              const evtArray = Array.isArray(responseData.Events.Evt) 
+                ? responseData.Events.Evt 
+                : [responseData.Events.Evt];
+              events = evtArray.map((e: any) => ({
+                code: Number(e.Code || e.code),
+                msg: e.Msg || e.msg || '',
+              }));
+            }
+
+            const response = {
+              resultado: responseData.Resultado || responseData.resultado || 'R',
+              codigoAutorizacion: responseData.CodigoAutorizacion || responseData.codigoAutorizacion,
+              fechaEmision: responseData.FechaEmision || responseData.fechaEmision,
+              fechaVencimiento: responseData.FechaVencimiento || responseData.fechaVencimiento,
+              importeTotal: responseData.ImporteTotal ? Number(responseData.ImporteTotal) : undefined,
+              estado: responseData.Estado || responseData.estado,
+              puntoVenta: puntoVenta,
+              tipoComprobante: tipoComprobante,
+              numeroComprobante: numeroComprobante,
+              cuitEmisor: responseData.CuitEmisor || responseData.cuitEmisor || cuitEmisor,
+              cuitReceptor: responseData.CuitReceptor || responseData.cuitReceptor,
+              errors: errors.length > 0 ? errors : undefined,
+              events: events.length > 0 ? events : undefined,
+            };
+
+            this.logger.log(`Comprobante constatado: ${response.resultado}`);
+            resolve(response);
+          } catch (parseError: any) {
+            this.logger.error(`Error al parsear respuesta WSCDC: ${parseError.message}`);
+            reject(new BadRequestException(`Error al procesar respuesta de WSCDC: ${parseError.message}`));
+          }
+        });
+      });
+    });
+  }
+
+  /**
+   * Consulta las modalidades de autorización de comprobantes
+   */
+  async consultarModalidadesComprobante(
+    cuitEmisor: string,
+    certificado: string,
+    clavePrivada: string,
+    homologacion: boolean = true,
+  ): Promise<{
+    modalidades: Array<{ Id: number; Desc: string; FchDesde: string; FchHasta?: string }>;
+    errors?: Array<{ code: number; msg: string }>;
+    events?: Array<{ code: number; msg: string }>;
+  }> {
+    this.logger.log('=== CONSULTANDO MODALIDADES DE COMPROBANTE WSCDC ===');
+    this.logger.log(`CUIT Emisor: ${cuitEmisor}`);
+    this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
+
+    const ticket = await this.getTicket('wscdc', certificado, clavePrivada, homologacion);
+    
+    const urls = this.getAfipUrls(homologacion);
+    const wscdcUrl = urls.wscdc;
+
+    return new Promise((resolve, reject) => {
+      soap.createClient(wscdcUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
+        if (err) {
+          this.logger.error(`Error al crear cliente SOAP WSCDC: ${err.message}`);
+          reject(new BadRequestException(`Error al crear cliente SOAP WSCDC: ${err.message}`));
+          return;
+        }
+
+        const request = {
+          auth: {
+            token: ticket.token,
+            sign: ticket.sign,
+            cuit: cuitEmisor.replace(/-/g, ''),
+          },
+        };
+
+        client.ComprobantesModalidadConsultar(request, (err: any, result: any) => {
+          if (err) {
+            this.logger.error(`Error en ComprobantesModalidadConsultar: ${err.message}`);
+            reject(new BadRequestException(`Error al consultar modalidades: ${err.message}`));
+            return;
+          }
+
+          try {
+            const responseData = result?.ComprobantesModalidadConsultarResult || result?.Result || result;
+            const resultGet = responseData?.ResultGet || responseData;
+            
+            // Parsear modalidades
+            const modalidadesData = resultGet?.Modalidad || resultGet?.modalidad || [];
+            const modalidadesArray = Array.isArray(modalidadesData) ? modalidadesData : (modalidadesData ? [modalidadesData] : []);
+
+            const modalidades = modalidadesArray.map((m: any) => ({
+              Id: Number(m.Id || m.id),
+              Desc: m.Desc || m.desc || '',
+              FchDesde: m.FchDesde || m.fchDesde || '',
+              FchHasta: m.FchHasta || m.fchHasta,
+            }));
+
+            // Parsear errores y eventos
+            let errors: Array<{ code: number; msg: string }> = [];
+            if (responseData.Errors?.Err) {
+              const errArray = Array.isArray(responseData.Errors.Err) ? responseData.Errors.Err : [responseData.Errors.Err];
+              errors = errArray.map((e: any) => ({ code: Number(e.Code || e.code), msg: e.Msg || e.msg || '' }));
+            }
+
+            let events: Array<{ code: number; msg: string }> = [];
+            if (responseData.Events?.Evt) {
+              const evtArray = Array.isArray(responseData.Events.Evt) ? responseData.Events.Evt : [responseData.Events.Evt];
+              events = evtArray.map((e: any) => ({ code: Number(e.Code || e.code), msg: e.Msg || e.msg || '' }));
+            }
+
+            this.logger.log(`Modalidades encontradas: ${modalidades.length}`);
+            resolve({ modalidades, errors: errors.length > 0 ? errors : undefined, events: events.length > 0 ? events : undefined });
+          } catch (parseError: any) {
+            this.logger.error(`Error al parsear modalidades: ${parseError.message}`);
+            reject(new BadRequestException(`Error al procesar modalidades: ${parseError.message}`));
+          }
+        });
+      });
+    });
+  }
+
+  /**
+   * Consulta los tipos de comprobante disponibles
+   */
+  async consultarTiposComprobanteWscdc(
+    cuitEmisor: string,
+    certificado: string,
+    clavePrivada: string,
+    homologacion: boolean = true,
+  ): Promise<{
+    tipos: Array<{ Id: number; Desc: string; FchDesde: string; FchHasta?: string }>;
+    errors?: Array<{ code: number; msg: string }>;
+    events?: Array<{ code: number; msg: string }>;
+  }> {
+    this.logger.log('=== CONSULTANDO TIPOS DE COMPROBANTE WSCDC ===');
+    this.logger.log(`CUIT Emisor: ${cuitEmisor}`);
+    this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
+
+    const ticket = await this.getTicket('wscdc', certificado, clavePrivada, homologacion);
+    
+    const urls = this.getAfipUrls(homologacion);
+    const wscdcUrl = urls.wscdc;
+
+    return new Promise((resolve, reject) => {
+      soap.createClient(wscdcUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
+        if (err) {
+          this.logger.error(`Error al crear cliente SOAP WSCDC: ${err.message}`);
+          reject(new BadRequestException(`Error al crear cliente SOAP WSCDC: ${err.message}`));
+          return;
+        }
+
+        const request = {
+          auth: {
+            token: ticket.token,
+            sign: ticket.sign,
+            cuit: cuitEmisor.replace(/-/g, ''),
+          },
+        };
+
+        client.ComprobantesTipoConsultar(request, (err: any, result: any) => {
+          if (err) {
+            this.logger.error(`Error en ComprobantesTipoConsultar: ${err.message}`);
+            reject(new BadRequestException(`Error al consultar tipos de comprobante: ${err.message}`));
+            return;
+          }
+
+          try {
+            const responseData = result?.ComprobantesTipoConsultarResult || result?.Result || result;
+            const resultGet = responseData?.ResultGet || responseData;
+            
+            const tiposData = resultGet?.CbteTipo || resultGet?.cbteTipo || [];
+            const tiposArray = Array.isArray(tiposData) ? tiposData : (tiposData ? [tiposData] : []);
+
+            const tipos = tiposArray.map((t: any) => ({
+              Id: Number(t.Id || t.id),
+              Desc: t.Desc || t.desc || '',
+              FchDesde: t.FchDesde || t.fchDesde || '',
+              FchHasta: t.FchHasta || t.fchHasta,
+            }));
+
+            let errors: Array<{ code: number; msg: string }> = [];
+            if (responseData.Errors?.Err) {
+              const errArray = Array.isArray(responseData.Errors.Err) ? responseData.Errors.Err : [responseData.Errors.Err];
+              errors = errArray.map((e: any) => ({ code: Number(e.Code || e.code), msg: e.Msg || e.msg || '' }));
+            }
+
+            let events: Array<{ code: number; msg: string }> = [];
+            if (responseData.Events?.Evt) {
+              const evtArray = Array.isArray(responseData.Events.Evt) ? responseData.Events.Evt : [responseData.Events.Evt];
+              events = evtArray.map((e: any) => ({ code: Number(e.Code || e.code), msg: e.Msg || e.msg || '' }));
+            }
+
+            this.logger.log(`Tipos de comprobante encontrados: ${tipos.length}`);
+            resolve({ tipos, errors: errors.length > 0 ? errors : undefined, events: events.length > 0 ? events : undefined });
+          } catch (parseError: any) {
+            this.logger.error(`Error al parsear tipos de comprobante: ${parseError.message}`);
+            reject(new BadRequestException(`Error al procesar tipos de comprobante: ${parseError.message}`));
+          }
+        });
+      });
+    });
+  }
+
+  /**
+   * Consulta los tipos de documento disponibles
+   */
+  async consultarTiposDocumento(
+    cuitEmisor: string,
+    certificado: string,
+    clavePrivada: string,
+    homologacion: boolean = true,
+  ): Promise<{
+    tipos: Array<{ Id: number; Desc: string; FchDesde: string; FchHasta?: string }>;
+    errors?: Array<{ code: number; msg: string }>;
+    events?: Array<{ code: number; msg: string }>;
+  }> {
+    this.logger.log('=== CONSULTANDO TIPOS DE DOCUMENTO WSCDC ===');
+    this.logger.log(`CUIT Emisor: ${cuitEmisor}`);
+    this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
+
+    const ticket = await this.getTicket('wscdc', certificado, clavePrivada, homologacion);
+    
+    const urls = this.getAfipUrls(homologacion);
+    const wscdcUrl = urls.wscdc;
+
+    return new Promise((resolve, reject) => {
+      soap.createClient(wscdcUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
+        if (err) {
+          this.logger.error(`Error al crear cliente SOAP WSCDC: ${err.message}`);
+          reject(new BadRequestException(`Error al crear cliente SOAP WSCDC: ${err.message}`));
+          return;
+        }
+
+        const request = {
+          auth: {
+            token: ticket.token,
+            sign: ticket.sign,
+            cuit: cuitEmisor.replace(/-/g, ''),
+          },
+        };
+
+        client.DocumentosTipoConsultar(request, (err: any, result: any) => {
+          if (err) {
+            this.logger.error(`Error en DocumentosTipoConsultar: ${err.message}`);
+            reject(new BadRequestException(`Error al consultar tipos de documento: ${err.message}`));
+            return;
+          }
+
+          try {
+            const responseData = result?.DocumentosTipoConsultarResult || result?.Result || result;
+            const resultGet = responseData?.ResultGet || responseData;
+            
+            const tiposData = resultGet?.DocTipo || resultGet?.docTipo || [];
+            const tiposArray = Array.isArray(tiposData) ? tiposData : (tiposData ? [tiposData] : []);
+
+            const tipos = tiposArray.map((t: any) => ({
+              Id: Number(t.Id || t.id),
+              Desc: t.Desc || t.desc || '',
+              FchDesde: t.FchDesde || t.fchDesde || '',
+              FchHasta: t.FchHasta || t.fchHasta,
+            }));
+
+            let errors: Array<{ code: number; msg: string }> = [];
+            if (responseData.Errors?.Err) {
+              const errArray = Array.isArray(responseData.Errors.Err) ? responseData.Errors.Err : [responseData.Errors.Err];
+              errors = errArray.map((e: any) => ({ code: Number(e.Code || e.code), msg: e.Msg || e.msg || '' }));
+            }
+
+            let events: Array<{ code: number; msg: string }> = [];
+            if (responseData.Events?.Evt) {
+              const evtArray = Array.isArray(responseData.Events.Evt) ? responseData.Events.Evt : [responseData.Events.Evt];
+              events = evtArray.map((e: any) => ({ code: Number(e.Code || e.code), msg: e.Msg || e.msg || '' }));
+            }
+
+            this.logger.log(`Tipos de documento encontrados: ${tipos.length}`);
+            resolve({ tipos, errors: errors.length > 0 ? errors : undefined, events: events.length > 0 ? events : undefined });
+          } catch (parseError: any) {
+            this.logger.error(`Error al parsear tipos de documento: ${parseError.message}`);
+            reject(new BadRequestException(`Error al procesar tipos de documento: ${parseError.message}`));
+          }
+        });
+      });
+    });
+  }
+
+  /**
+   * Consulta los tipos de datos opcionales disponibles
+   */
+  async consultarTiposOpcionales(
+    cuitEmisor: string,
+    certificado: string,
+    clavePrivada: string,
+    homologacion: boolean = true,
+  ): Promise<{
+    tipos: Array<{ Id: string; Desc: string; FchDesde: string; FchHasta?: string }>;
+    errors?: Array<{ code: number; msg: string }>;
+    events?: Array<{ code: number; msg: string }>;
+  }> {
+    this.logger.log('=== CONSULTANDO TIPOS DE DATOS OPCIONALES WSCDC ===');
+    this.logger.log(`CUIT Emisor: ${cuitEmisor}`);
+    this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
+
+    const ticket = await this.getTicket('wscdc', certificado, clavePrivada, homologacion);
+    
+    const urls = this.getAfipUrls(homologacion);
+    const wscdcUrl = urls.wscdc;
+
+    return new Promise((resolve, reject) => {
+      soap.createClient(wscdcUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
+        if (err) {
+          this.logger.error(`Error al crear cliente SOAP WSCDC: ${err.message}`);
+          reject(new BadRequestException(`Error al crear cliente SOAP WSCDC: ${err.message}`));
+          return;
+        }
+
+        const request = {
+          auth: {
+            token: ticket.token,
+            sign: ticket.sign,
+            cuit: cuitEmisor.replace(/-/g, ''),
+          },
+        };
+
+        client.OpcionalesTipoConsultar(request, (err: any, result: any) => {
+          if (err) {
+            this.logger.error(`Error en OpcionalesTipoConsultar: ${err.message}`);
+            reject(new BadRequestException(`Error al consultar tipos opcionales: ${err.message}`));
+            return;
+          }
+
+          try {
+            const responseData = result?.OpcionalesTipoConsultarResult || result?.Result || result;
+            const resultGet = responseData?.ResultGet || responseData;
+            
+            const tiposData = resultGet?.OpcionalTipo || resultGet?.opcionalTipo || [];
+            const tiposArray = Array.isArray(tiposData) ? tiposData : (tiposData ? [tiposData] : []);
+
+            const tipos = tiposArray.map((t: any) => ({
+              Id: String(t.Id || t.id || ''),
+              Desc: t.Desc || t.desc || '',
+              FchDesde: t.FchDesde || t.fchDesde || '',
+              FchHasta: t.FchHasta || t.fchHasta,
+            }));
+
+            let errors: Array<{ code: number; msg: string }> = [];
+            if (responseData.Errors?.Err) {
+              const errArray = Array.isArray(responseData.Errors.Err) ? responseData.Errors.Err : [responseData.Errors.Err];
+              errors = errArray.map((e: any) => ({ code: Number(e.Code || e.code), msg: e.Msg || e.msg || '' }));
+            }
+
+            let events: Array<{ code: number; msg: string }> = [];
+            if (responseData.Events?.Evt) {
+              const evtArray = Array.isArray(responseData.Events.Evt) ? responseData.Events.Evt : [responseData.Events.Evt];
+              events = evtArray.map((e: any) => ({ code: Number(e.Code || e.code), msg: e.Msg || e.msg || '' }));
+            }
+
+            this.logger.log(`Tipos opcionales encontrados: ${tipos.length}`);
+            resolve({ tipos, errors: errors.length > 0 ? errors : undefined, events: events.length > 0 ? events : undefined });
+          } catch (parseError: any) {
+            this.logger.error(`Error al parsear tipos opcionales: ${parseError.message}`);
+            reject(new BadRequestException(`Error al procesar tipos opcionales: ${parseError.message}`));
+          }
+        });
+      });
+    });
+  }
+
+  /**
+   * Método Dummy para verificar funcionamiento de infraestructura
+   * No requiere autenticación
+   */
+  async comprobanteDummy(homologacion: boolean = true): Promise<{
+    appServer: string;
+    dbServer: string;
+    authServer: string;
+  }> {
+    this.logger.log('=== COMPROBANTE DUMMY WSCDC ===');
+    this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
+
+    const urls = this.getAfipUrls(homologacion);
+    const wscdcUrl = urls.wscdc;
+
+    return new Promise((resolve, reject) => {
+      soap.createClient(wscdcUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
+        if (err) {
+          this.logger.error(`Error al crear cliente SOAP WSCDC: ${err.message}`);
+          reject(new BadRequestException(`Error al crear cliente SOAP WSCDC: ${err.message}`));
+          return;
+        }
+
+        // Dummy no requiere parámetros
+        const request = {};
+
+        client.ComprobanteDummy(request, (err: any, result: any) => {
+          if (err) {
+            this.logger.error(`Error en ComprobanteDummy: ${err.message}`);
+            reject(new BadRequestException(`Error al ejecutar dummy: ${err.message}`));
+            return;
+          }
+
+          try {
+            const responseData = result?.ComprobanteDummyResult || result?.Result || result;
+
+            const response = {
+              appServer: String(responseData.AppServer || responseData.appServer || ''),
+              dbServer: String(responseData.DbServer || responseData.dbServer || ''),
+              authServer: String(responseData.AuthServer || responseData.authServer || ''),
+            };
+
+            this.logger.log(`Dummy ejecutado: AppServer=${response.appServer}, DbServer=${response.dbServer}, AuthServer=${response.authServer}`);
+            resolve(response);
+          } catch (parseError: any) {
+            this.logger.error(`Error al parsear dummy: ${parseError.message}`);
+            reject(new BadRequestException(`Error al procesar dummy: ${parseError.message}`));
+          }
         });
       });
     });

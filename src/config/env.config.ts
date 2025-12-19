@@ -5,11 +5,15 @@
  * - WSAA: https://wsaa.afip.gov.ar/ws/services/LoginCms?WSDL
  * - WSFE: https://servicios1.afip.gov.ar/wsfev1/service.asmx?WSDL
  * - Padrón: https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA5?WSDL
+ * - Ventanilla Electrónica: https://infraestructura.afip.gob.ar/ve-ws/services/veconsumer?wsdl
+ * - WSCDC: https://servicios1.arca.gov.ar/WSCDC/service.asmx?WSDL
  * 
  * HOMOLOGACIÓN (testing, sin efecto fiscal):
  * - WSAA: https://wsaahomo.afip.gov.ar/ws/services/LoginCms?WSDL
  * - WSFE: https://wswhomo.afip.gov.ar/wsfev1/service.asmx?WSDL
  * - Padrón: https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA5?WSDL
+ * - Ventanilla Electrónica: https://stable-middleware-tecno-ext.afip.gob.ar/ve-ws/services/veconsumer?wsdl
+ * - WSCDC: https://wswhomo.arca.gov.ar/WSCDC/service.asmx?WSDL
  */
 
 const isProduction = process.env.AFIP_ENVIRONMENT === 'production';
@@ -20,11 +24,15 @@ const AFIP_URLS = {
     wsaa: 'https://wsaa.afip.gov.ar/ws/services/LoginCms?WSDL',
     wsfe: 'https://servicios1.afip.gov.ar/wsfev1/service.asmx?WSDL',
     padron: 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA5?WSDL',
+    ventanilla: 'https://infraestructura.afip.gob.ar/ve-ws/services/veconsumer?wsdl',
+    wscdc: 'https://servicios1.arca.gov.ar/WSCDC/service.asmx?WSDL',
   },
   homologacion: {
     wsaa: 'https://wsaahomo.afip.gov.ar/ws/services/LoginCms?WSDL',
     wsfe: 'https://wswhomo.afip.gov.ar/wsfev1/service.asmx?WSDL',
     padron: 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA5?WSDL',
+    ventanilla: 'https://stable-middleware-tecno-ext.afip.gob.ar/ve-ws/services/veconsumer?wsdl',
+    wscdc: 'https://wswhomo.arca.gov.ar/WSCDC/service.asmx?WSDL',
   },
 };
 
@@ -49,6 +57,8 @@ export default () => ({
     wsaaUrl: process.env.AFIP_WSAA_URL || afipEnv.wsaa,
     wsfeUrl: process.env.AFIP_WSFE_URL || afipEnv.wsfe,
     padronUrl: process.env.AFIP_PADRON_URL || afipEnv.padron,
+    ventanillaUrl: process.env.AFIP_VENTANILLA_URL || afipEnv.ventanilla,
+    wscdcUrl: process.env.AFIP_WSCDC_URL || afipEnv.wscdc,
     certPath: process.env.AFIP_CERT_PATH || '',
     keyPath: process.env.AFIP_KEY_PATH || '',
     cuit: process.env.AFIP_CUIT || '',

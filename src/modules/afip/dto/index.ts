@@ -5,6 +5,8 @@ export * from './invoice-response.dto';
 export * from './ultimo-autorizado.dto';
 export * from './consultar-contribuyente.dto';
 export * from './afip-params.dto';
+export * from './ventanilla-electronica.dto';
+export * from './wscdc.dto';
 
 // Explicit exports to help TypeScript
 export { 
@@ -32,3 +34,36 @@ export {
   CondicionIvaReceptorResponseDto,
   GenerarQrRequestDto,
 } from './afip-params.dto';
+export {
+  ConsultarComunicacionesDto,
+  ConsumirComunicacionDto,
+  ConsultarSistemasPublicadoresDto,
+  ConsultarEstadosDto,
+  ComunicacionesPaginadasResponseDto,
+  ComunicacionDetalleResponseDto,
+  SistemasPublicadoresResponseDto,
+  EstadosComunicacionResponseDto,
+  ComunicacionDto,
+  SistemaPublicadorDto,
+  EstadoComunicacionDto,
+} from './ventanilla-electronica.dto';
+export {
+  WscdcBaseRequestDto,
+  ComprobanteConstatarDto,
+  ComprobantesModalidadConsultarDto,
+  ComprobantesTipoConsultarDto,
+  DocumentosTipoConsultarDto,
+  OpcionalesTipoConsultarDto,
+  ComprobanteDummyDto,
+  ComprobanteConstatarResponseDto,
+  ModalidadResponseDto,
+  TipoComprobanteWscdcResponseDto,
+  TipoDocumentoResponseDto,
+  TipoOpcionalResponseDto,
+  DummyResponseDto,
+  ErrorEventDto,
+  ModalidadItemDto,
+  TipoComprobanteWscdcItemDto,
+  TipoDocumentoItemDto,
+  TipoOpcionalItemDto,
+} from './wscdc.dto';
