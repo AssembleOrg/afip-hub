@@ -132,6 +132,7 @@ Crea un comprobante electrónico (factura, nota de crédito, nota de débito, et
   async createInvoice(
     @Body() createInvoiceDto: CreateInvoiceDto,
   ): Promise<ResponseDto<InvoiceResponseDto>> {
+    console.log('createInvoiceDto', createInvoiceDto);
     const invoice = await this.afipService.createInvoice(createInvoiceDto);
     return new ResponseDto(invoice, 'Factura creada exitosamente');
   }

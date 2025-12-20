@@ -22,6 +22,18 @@ module.exports = function (options, webpack) {
       ...options.output,
       libraryTarget: 'commonjs2',
     },
+    watchOptions: {
+      ignored: [
+        '**/node_modules/**',
+        '**/dist/**',
+        '**/.git/**',
+        '**/tmp/**',
+        '**/coverage/**',
+        '**/.pnpm/**',
+      ],
+      aggregateTimeout: 300,
+      poll: false,
+    },
     plugins: [
       ...options.plugins,
       new webpack.IgnorePlugin({

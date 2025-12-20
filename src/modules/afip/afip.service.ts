@@ -613,8 +613,17 @@ export class AfipService {
 
       // Obtener ticket del servicio de Constancia de Inscripción
       // ID del servicio según manual v3.4: ws_sr_constancia_inscripcion
+      // NOTA: Algunos servicios usan ws_sr_padron_a5 como ID alternativo
       this.logger.log('Obteniendo ticket del servicio ws_sr_constancia_inscripcion...');
-      const ticket = await this.getTicket('ws_sr_constancia_inscripcion', certificado, clavePrivada, homologacion);
+      let ticket;
+      try {
+        ticket = await this.getTicket('ws_sr_constancia_inscripcion', certificado, clavePrivada, homologacion);
+      } catch (error: any) {
+        // Si falla, intentar con el ID alternativo
+        this.logger.warn(`Error al obtener ticket con ws_sr_constancia_inscripcion: ${error.message}`);
+        this.logger.log('Intentando con ws_sr_padron_a5...');
+        ticket = await this.getTicket('ws_sr_padron_a5', certificado, clavePrivada, homologacion);
+      }
       this.logger.log(`Ticket obtenido, válido hasta: ${ticket.expirationTime}`);
 
       // URL del servicio de Constancia de Inscripción
@@ -642,15 +651,24 @@ export class AfipService {
 
           // Estructura del request según documentación oficial Constancia de Inscripción v3.4
           // https://www.afip.gob.ar/ws/WSCI/manual-ws-sr-ws-constancia-inscripcion-v3.4.pdf
+          // IMPORTANTE: El servicio de Constancia de Inscripción requiere token y sign en el nivel raíz
+          // NO dentro de un objeto auth (a diferencia de otros servicios como WSFE o WSCDC)
+          const cuitEmisorClean = cuitEmisor.replace(/-/g, '');
+          const cuitAConsultarClean = cuitAConsultar.replace(/-/g, '');
+          
           const req = {
             token: ticket.token,
             sign: ticket.sign,
-            cuitRepresentada: cuitEmisor,
-            idPersona: cuitAConsultar, // CUIT del contribuyente a consultar
+            cuitRepresentada: cuitEmisorClean,
+            idPersona: cuitAConsultarClean,
           };
 
           this.logger.log('=== REQUEST getPersona_v2 (Constancia de Inscripción) ===');
-          this.logger.log(JSON.stringify(req, null, 2));
+          this.logger.log(`CUIT Emisor (limpio): ${cuitEmisorClean}`);
+          this.logger.log(`CUIT a Consultar (limpio): ${cuitAConsultarClean}`);
+          this.logger.log(`Token (primeros 50 chars): ${ticket.token.substring(0, 50)}...`);
+          this.logger.log(`Sign (primeros 50 chars): ${ticket.sign.substring(0, 50)}...`);
+          this.logger.log('Request completo: ' + JSON.stringify(req, null, 2));
 
           // Método según documentación v3.4: getPersona_v2 (versión más reciente)
           // También existe getPersona pero se recomienda usar _v2
@@ -677,13 +695,25 @@ export class AfipService {
               this.logger.error(`Error al consultar contribuyente: ${err.message}`);
               // Intentar loguear el error de forma segura
               try {
-                this.logger.error(JSON.stringify(err, null, 2));
+                this.logger.error('Error completo: ' + JSON.stringify(err, null, 2));
               } catch (e) {
                 this.logger.error(`Error (no serializable): ${err.toString()}`);
               }
+              
+              // Si el error es de autenticación, puede ser problema con el ID del servicio o el formato del request
+              if (err.message && err.message.includes('firma valida')) {
+                this.logger.error('⚠️ ERROR DE AUTENTICACIÓN: El ticket puede no ser válido para este servicio');
+                this.logger.error('Posibles causas:');
+                this.logger.error('1. El ID del servicio usado para obtener el ticket no es correcto');
+                this.logger.error('2. El formato del request no es el esperado por el servicio');
+                this.logger.error('3. El certificado/clave privada no están registrados para este servicio');
+                this.logger.error(`ID del servicio usado: ws_sr_constancia_inscripcion`);
+                this.logger.error('Verifica en el manual v3.4 si el ID del servicio es correcto');
+              }
+              
               reject(
                 new BadRequestException(
-                  `Error al consultar contribuyente: ${err.message}`,
+                  `Error al consultar contribuyente: ${err.message}. Si el error es de autenticación, verifica que el certificado esté registrado para el servicio de Constancia de Inscripción y que el ID del servicio sea correcto.`,
                 ),
               );
               return;
@@ -950,6 +980,7 @@ export class AfipService {
           const fechaActual = `${year}${month}${day}`;
           ultimo = { CbteNro: 0, CbteFch: fechaActual };
         } else {
+          this.logger.error('Error al obtener último comprobante autorizado: ' + JSON.stringify(error, null, 2));
           // Re-lanzar otros errores
           throw error;
         }
