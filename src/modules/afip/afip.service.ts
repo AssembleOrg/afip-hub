@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import * as xml2js from 'xml2js';
+import * as crypto from 'crypto';
 import { AfipTicketDto } from './dto';
 import { 
   CreateInvoiceDto, 
@@ -18,10 +19,19 @@ import {
 import { InvoiceResponseDto, QrDataDto } from './dto/invoice-response.dto';
 import { ConsultarContribuyenteDto, ContribuyenteResponseDto } from './dto/consultar-contribuyente.dto';
 
+interface CachedTicket {
+  ticket: AfipTicketDto;
+  expiresAt: Date;
+}
+
 @Injectable()
 export class AfipService {
   private readonly logger = new Logger(AfipService.name);
   private wsaaUrl: string;
+  
+  // Cache de tickets para evitar solicitudes duplicadas a AFIP
+  // Clave: service + hash(certificado) + homologacion
+  private ticketCache: Map<string, CachedTicket> = new Map();
 
   // URLs por defecto según entorno
   private readonly AFIP_URLS = {
@@ -94,6 +104,30 @@ export class AfipService {
     homologacion: boolean = true,
   ): Promise<AfipTicketDto> {
     try {
+      // Generar clave única para el cache: service + hash(certificado) + entorno
+      const certHash = crypto.createHash('sha256').update(certificado).digest('hex').substring(0, 16);
+      const cacheKey = `${service}_${certHash}_${homologacion ? 'homo' : 'prod'}`;
+
+      // Verificar si hay un ticket válido en cache
+      const cached = this.ticketCache.get(cacheKey);
+      if (cached) {
+        const now = new Date();
+        // Verificar si el ticket sigue siendo válido (con margen de 5 minutos)
+        const margin = 5 * 60 * 1000; // 5 minutos en milisegundos
+        const expiresAtWithMargin = new Date(cached.expiresAt.getTime() - margin);
+        
+        if (now < expiresAtWithMargin) {
+          this.logger.log(`=== TICKET DESDE CACHE ===`);
+          this.logger.log(`Servicio: ${service}, Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
+          this.logger.log(`Válido hasta: ${cached.expiresAt.toISOString()}`);
+          return cached.ticket;
+        } else {
+          // Ticket expirado, remover del cache
+          this.logger.log(`Ticket en cache expirado, solicitando nuevo...`);
+          this.ticketCache.delete(cacheKey);
+        }
+      }
+
       this.logger.log(`=== INICIO OBTENCIÓN DE TICKET ===`);
       this.logger.log(`Servicio solicitado: ${service}`);
       this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
@@ -116,6 +150,16 @@ export class AfipService {
       const urls = this.getAfipUrls(homologacion);
       const ticket = await this.callWSAA(signedTra, urls.wsaa);
 
+      // Guardar en cache
+      const expirationDate = new Date(ticket.expirationTime);
+      this.ticketCache.set(cacheKey, {
+        ticket,
+        expiresAt: expirationDate,
+      });
+
+      // Limpiar tickets expirados del cache (mantener solo los últimos 100)
+      this.cleanExpiredTickets();
+
       this.logger.log(`=== TICKET OBTENIDO ===`);
       this.logger.log(`Token (primeros 50 caracteres): ${ticket.token.substring(0, 50)}...`);
       this.logger.log(`Válido desde: ${ticket.generationTime}`);
@@ -124,11 +168,67 @@ export class AfipService {
 
       return ticket;
     } catch (error: any) {
+      // Si el error es "alreadyAuthenticated", intentar usar cache o esperar
+      if (error.message?.includes('alreadyAuthenticated') || error.message?.includes('ya posee un TA valido')) {
+        this.logger.warn('AFIP reporta ticket ya autenticado, esperando 2 segundos y reintentando...');
+        
+        // Esperar 2 segundos antes de reintentar
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        // Intentar obtener del cache nuevamente
+        const certHash = crypto.createHash('sha256').update(certificado).digest('hex').substring(0, 16);
+        const cacheKey = `${service}_${certHash}_${homologacion ? 'homo' : 'prod'}`;
+        const cached = this.ticketCache.get(cacheKey);
+        
+        if (cached) {
+          const now = new Date();
+          const margin = 5 * 60 * 1000;
+          const expiresAtWithMargin = new Date(cached.expiresAt.getTime() - margin);
+          
+          if (now < expiresAtWithMargin) {
+            this.logger.log('Usando ticket del cache después de error alreadyAuthenticated');
+            return cached.ticket;
+          }
+        }
+        
+        // Si no hay cache válido, lanzar error
+        throw new BadRequestException(
+          'AFIP ya tiene un ticket válido para este servicio. Espera unos segundos e intenta nuevamente.',
+        );
+      }
+      
       this.logger.error(`Error al obtener ticket: ${error.message}`);
       this.logger.error(`Stack: ${error.stack}`);
       throw new BadRequestException(
         `Error al obtener ticket de AFIP: ${error.message}`,
       );
+    }
+  }
+
+  /**
+   * Limpia tickets expirados del cache para evitar acumulación de memoria
+   */
+  private cleanExpiredTickets(): void {
+    const now = new Date();
+    const keysToDelete: string[] = [];
+
+    for (const [key, cached] of this.ticketCache.entries()) {
+      if (now >= cached.expiresAt) {
+        keysToDelete.push(key);
+      }
+    }
+
+    keysToDelete.forEach(key => this.ticketCache.delete(key));
+
+    // Si el cache tiene más de 100 entradas, limpiar las más antiguas
+    if (this.ticketCache.size > 100) {
+      const entries = Array.from(this.ticketCache.entries());
+      entries.sort((a, b) => a[1].expiresAt.getTime() - b[1].expiresAt.getTime());
+      
+      // Eliminar las 50 más antiguas
+      for (let i = 0; i < 50 && i < entries.length; i++) {
+        this.ticketCache.delete(entries[i][0]);
+      }
     }
   }
 
@@ -613,8 +713,17 @@ export class AfipService {
 
       // Obtener ticket del servicio de Constancia de Inscripción
       // ID del servicio según manual v3.4: ws_sr_constancia_inscripcion
+      // NOTA: Algunos servicios usan ws_sr_padron_a5 como ID alternativo
       this.logger.log('Obteniendo ticket del servicio ws_sr_constancia_inscripcion...');
-      const ticket = await this.getTicket('ws_sr_constancia_inscripcion', certificado, clavePrivada, homologacion);
+      let ticket;
+      try {
+        ticket = await this.getTicket('ws_sr_constancia_inscripcion', certificado, clavePrivada, homologacion);
+      } catch (error: any) {
+        // Si falla, intentar con el ID alternativo
+        this.logger.warn(`Error al obtener ticket con ws_sr_constancia_inscripcion: ${error.message}`);
+        this.logger.log('Intentando con ws_sr_padron_a5...');
+        ticket = await this.getTicket('ws_sr_padron_a5', certificado, clavePrivada, homologacion);
+      }
       this.logger.log(`Ticket obtenido, válido hasta: ${ticket.expirationTime}`);
 
       // URL del servicio de Constancia de Inscripción
@@ -642,15 +751,24 @@ export class AfipService {
 
           // Estructura del request según documentación oficial Constancia de Inscripción v3.4
           // https://www.afip.gob.ar/ws/WSCI/manual-ws-sr-ws-constancia-inscripcion-v3.4.pdf
+          // IMPORTANTE: El servicio de Constancia de Inscripción requiere token y sign en el nivel raíz
+          // NO dentro de un objeto auth (a diferencia de otros servicios como WSFE o WSCDC)
+          const cuitEmisorClean = cuitEmisor.replace(/-/g, '');
+          const cuitAConsultarClean = cuitAConsultar.replace(/-/g, '');
+          
           const req = {
             token: ticket.token,
             sign: ticket.sign,
-            cuitRepresentada: cuitEmisor,
-            idPersona: cuitAConsultar, // CUIT del contribuyente a consultar
+            cuitRepresentada: cuitEmisorClean,
+            idPersona: cuitAConsultarClean,
           };
 
           this.logger.log('=== REQUEST getPersona_v2 (Constancia de Inscripción) ===');
-          this.logger.log(JSON.stringify(req, null, 2));
+          this.logger.log(`CUIT Emisor (limpio): ${cuitEmisorClean}`);
+          this.logger.log(`CUIT a Consultar (limpio): ${cuitAConsultarClean}`);
+          this.logger.log(`Token (primeros 50 chars): ${ticket.token.substring(0, 50)}...`);
+          this.logger.log(`Sign (primeros 50 chars): ${ticket.sign.substring(0, 50)}...`);
+          this.logger.log('Request completo: ' + JSON.stringify(req, null, 2));
 
           // Método según documentación v3.4: getPersona_v2 (versión más reciente)
           // También existe getPersona pero se recomienda usar _v2
@@ -677,13 +795,25 @@ export class AfipService {
               this.logger.error(`Error al consultar contribuyente: ${err.message}`);
               // Intentar loguear el error de forma segura
               try {
-                this.logger.error(JSON.stringify(err, null, 2));
+                this.logger.error('Error completo: ' + JSON.stringify(err, null, 2));
               } catch (e) {
                 this.logger.error(`Error (no serializable): ${err.toString()}`);
               }
+              
+              // Si el error es de autenticación, puede ser problema con el ID del servicio o el formato del request
+              if (err.message && err.message.includes('firma valida')) {
+                this.logger.error('⚠️ ERROR DE AUTENTICACIÓN: El ticket puede no ser válido para este servicio');
+                this.logger.error('Posibles causas:');
+                this.logger.error('1. El ID del servicio usado para obtener el ticket no es correcto');
+                this.logger.error('2. El formato del request no es el esperado por el servicio');
+                this.logger.error('3. El certificado/clave privada no están registrados para este servicio');
+                this.logger.error(`ID del servicio usado: ws_sr_constancia_inscripcion`);
+                this.logger.error('Verifica en el manual v3.4 si el ID del servicio es correcto');
+              }
+              
               reject(
                 new BadRequestException(
-                  `Error al consultar contribuyente: ${err.message}`,
+                  `Error al consultar contribuyente: ${err.message}. Si el error es de autenticación, verifica que el certificado esté registrado para el servicio de Constancia de Inscripción y que el ID del servicio sea correcto.`,
                 ),
               );
               return;
@@ -950,6 +1080,7 @@ export class AfipService {
           const fechaActual = `${year}${month}${day}`;
           ultimo = { CbteNro: 0, CbteFch: fechaActual };
         } else {
+          this.logger.error('Error al obtener último comprobante autorizado: ' + JSON.stringify(error, null, 2));
           // Re-lanzar otros errores
           throw error;
         }
