@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, Logger } from '@nestjs/common';
+import { Injectable, BadRequestException, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as soap from 'soap';
 import * as fs from 'fs';
@@ -24,14 +24,33 @@ interface CachedTicket {
   expiresAt: Date;
 }
 
+interface PendingTicketRequest {
+  promise: Promise<AfipTicketDto>;
+  startTime: Date;
+}
+
+/** Formato serializado para persistir en disco */
+interface PersistedTicketCache {
+  [cacheKey: string]: {
+    ticket: AfipTicketDto;
+    expiresAt: string; // ISO
+  };
+}
+
 @Injectable()
-export class AfipService {
+export class AfipService implements OnModuleInit {
   private readonly logger = new Logger(AfipService.name);
   private wsaaUrl: string;
   
-  // Cache de tickets para evitar solicitudes duplicadas a AFIP
-  // Clave: service + hash(certificado) + homologacion
+  // Cache de tickets en memoria (clave: service + hash(certificado) + homologacion)
   private ticketCache: Map<string, CachedTicket> = new Map();
+  
+  // Mapa de tickets en progreso para evitar race conditions
+  private pendingTicketRequests: Map<string, PendingTicketRequest> = new Map();
+  
+  // Persistencia en disco: ruta del archivo (null = no persistir)
+  private ticketCacheFilePath: string | null = null;
+  private persistWritePromise: Promise<void> = Promise.resolve();
 
   // URLs por defecto según entorno
   private readonly AFIP_URLS = {
@@ -53,23 +72,34 @@ export class AfipService {
 
   constructor(private configService: ConfigService) {
     this.wsaaUrl = this.configService.get<string>('afip.wsaaUrl') || '';
+    const configuredPath = this.configService.get<string>('afip.ticketCachePath') || '';
+    this.ticketCacheFilePath = configuredPath.trim()
+      ? configuredPath.trim()
+      : path.join(process.cwd(), '.afip-ticket-cache.json');
+  }
+
+  async onModuleInit(): Promise<void> {
+    await this.loadTicketCacheFromFile();
   }
 
   /**
-   * Obtiene las URLs de AFIP según el parámetro homologacion
-   * @param homologacion - true para homologación, false para producción. Default: true
+   * Obtiene las URLs de AFIP según el parámetro homologacion del request.
+   * El parámetro homologacion tiene prioridad sobre la config global, para que
+   * cada request pueda elegir entorno (multi-tenant / retry con mismo entorno).
+   * @param homologacion - true para homologación (testing), false para producción. Default: false (producción)
    * @returns URLs del entorno seleccionado
    */
-  private getAfipUrls(homologacion: boolean = true) {
+  private getAfipUrls(homologacion: boolean = false) {
     const env = homologacion ? 'homologacion' : 'production';
     const defaultUrls = this.AFIP_URLS[env];
-    
+    // Usar siempre las URLs del entorno solicitado en el request; no sobrescribir con config
+    // para que homologacion=true siempre use wsaahomo/wsfe homo y no la URL de producción.
     return {
-      wsaa: this.configService.get<string>('afip.wsaaUrl') || defaultUrls.wsaa,
-      wsfe: this.configService.get<string>('afip.wsfeUrl') || defaultUrls.wsfe,
-      padron: this.configService.get<string>('afip.padronUrl') || defaultUrls.padron,
-      ventanilla: this.configService.get<string>('afip.ventanillaUrl') || defaultUrls.ventanilla,
-      wscdc: this.configService.get<string>('afip.wscdcUrl') || defaultUrls.wscdc,
+      wsaa: defaultUrls.wsaa,
+      wsfe: defaultUrls.wsfe,
+      padron: defaultUrls.padron,
+      ventanilla: defaultUrls.ventanilla,
+      wscdc: defaultUrls.wscdc,
     };
   }
 
@@ -101,63 +131,107 @@ export class AfipService {
     service: string,
     certificado: string,
     clavePrivada: string,
-    homologacion: boolean = true,
+    homologacion: boolean = false,
+  ): Promise<AfipTicketDto> {
+    // Generar clave única para el cache: service + hash(certificado) + entorno
+    const certHash = crypto.createHash('sha256').update(certificado).digest('hex').substring(0, 16);
+    const cacheKey = `${service}_${certHash}_${homologacion ? 'homo' : 'prod'}`;
+
+    // 1. Verificar si hay un ticket válido en cache
+    const cached = this.ticketCache.get(cacheKey);
+    if (cached) {
+      const now = new Date();
+      // Verificar si el ticket sigue siendo válido (con margen de 5 minutos)
+      const margin = 5 * 60 * 1000; // 5 minutos en milisegundos
+      const expiresAtWithMargin = new Date(cached.expiresAt.getTime() - margin);
+      
+      if (now < expiresAtWithMargin) {
+        this.logger.log(`=== TICKET DESDE CACHE ===`);
+        this.logger.log(`Servicio: ${service}, Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
+        this.logger.log(`Válido hasta: ${cached.expiresAt.toISOString()}`);
+        return cached.ticket;
+      } else {
+        // Ticket expirado, remover del cache
+        this.logger.log(`Ticket en cache expirado, solicitando nuevo...`);
+        this.ticketCache.delete(cacheKey);
+      }
+    }
+
+    // 2. Verificar si ya hay una request en progreso para este cacheKey
+    const pendingRequest = this.pendingTicketRequests.get(cacheKey);
+    if (pendingRequest) {
+      this.logger.log(`=== ESPERANDO TICKET EN PROGRESO ===`);
+      this.logger.log(`Servicio: ${service}, hay una solicitud en curso, esperando resultado...`);
+      try {
+        // Esperar al resultado de la request existente
+        const ticket = await pendingRequest.promise;
+        this.logger.log(`Ticket recibido de request en progreso para ${service}`);
+        return ticket;
+      } catch (error) {
+        // Si la request en progreso falló, intentaremos obtener uno nuevo
+        this.logger.warn(`Request en progreso falló, intentando nueva solicitud...`);
+        // La request pendiente ya se eliminó en el finally del obtainTicketFromWSAA
+      }
+    }
+
+    // 3. No hay ticket en cache ni request en progreso, crear nueva solicitud
+    const ticketPromise = this.obtainTicketFromWSAA(service, certificado, clavePrivada, homologacion, cacheKey);
+    
+    // Registrar esta request como pendiente
+    this.pendingTicketRequests.set(cacheKey, {
+      promise: ticketPromise,
+      startTime: new Date(),
+    });
+
+    try {
+      const ticket = await ticketPromise;
+      return ticket;
+    } finally {
+      // Limpiar la request pendiente cuando termine (éxito o error)
+      this.pendingTicketRequests.delete(cacheKey);
+    }
+  }
+
+  /**
+   * Método privado que realiza la obtención real del ticket desde WSAA
+   * Se separa de getTicket para poder manejar el bloqueo de requests concurrentes
+   */
+  private async obtainTicketFromWSAA(
+    service: string,
+    certificado: string,
+    clavePrivada: string,
+    homologacion: boolean,
+    cacheKey: string,
   ): Promise<AfipTicketDto> {
     try {
-      // Generar clave única para el cache: service + hash(certificado) + entorno
-      const certHash = crypto.createHash('sha256').update(certificado).digest('hex').substring(0, 16);
-      const cacheKey = `${service}_${certHash}_${homologacion ? 'homo' : 'prod'}`;
-
-      // Verificar si hay un ticket válido en cache
-      const cached = this.ticketCache.get(cacheKey);
-      if (cached) {
-        const now = new Date();
-        // Verificar si el ticket sigue siendo válido (con margen de 5 minutos)
-        const margin = 5 * 60 * 1000; // 5 minutos en milisegundos
-        const expiresAtWithMargin = new Date(cached.expiresAt.getTime() - margin);
-        
-        if (now < expiresAtWithMargin) {
-          this.logger.log(`=== TICKET DESDE CACHE ===`);
-          this.logger.log(`Servicio: ${service}, Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
-          this.logger.log(`Válido hasta: ${cached.expiresAt.toISOString()}`);
-          return cached.ticket;
-        } else {
-          // Ticket expirado, remover del cache
-          this.logger.log(`Ticket en cache expirado, solicitando nuevo...`);
-          this.ticketCache.delete(cacheKey);
-        }
-      }
-
       this.logger.log(`=== INICIO OBTENCIÓN DE TICKET ===`);
       this.logger.log(`Servicio solicitado: ${service}`);
       this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
       // Paso 1: Crear el TRA (Ticket de Requerimiento de Acceso)
-      // Es un XML que contiene la solicitud de acceso al servicio
       const tra = this.createTRA(service);
       this.logger.log('TRA generado:');
       this.logger.log(tra);
 
       // Paso 2: Firmar el TRA con el certificado digital
-      // Esto crea un CMS (Cryptographic Message Syntax) firmado
       this.logger.log('Firmando TRA con certificado...');
       const signedTra = this.signTRA(tra, certificado, clavePrivada);
       this.logger.log(`CMS generado (primeros 100 caracteres): ${signedTra.substring(0, 100)}...`);
 
       // Paso 3: Llamar al servicio WSAA para obtener el TA
-      // WSAA valida la firma y devuelve un Ticket de Acceso válido
       this.logger.log('Llamando a WSAA...');
       const urls = this.getAfipUrls(homologacion);
       const ticket = await this.callWSAA(signedTra, urls.wsaa);
 
-      // Guardar en cache
-      const expirationDate = new Date(ticket.expirationTime);
+      // Guardar en cache (memoria + disco). AFIP devuelve ISO o formato compacto
+      const expirationDate = this.parseAfipDate(ticket.expirationTime);
       this.ticketCache.set(cacheKey, {
         ticket,
         expiresAt: expirationDate,
       });
+      this.persistTicketCache();
 
-      // Limpiar tickets expirados del cache (mantener solo los últimos 100)
+      // Limpiar tickets expirados del cache
       this.cleanExpiredTickets();
 
       this.logger.log(`=== TICKET OBTENIDO ===`);
@@ -168,18 +242,27 @@ export class AfipService {
 
       return ticket;
     } catch (error: any) {
-      // Si el error es "alreadyAuthenticated", intentar usar cache o esperar
+      // Si el error es "alreadyAuthenticated", AFIP ya tiene un TA válido pero nosotros no lo tenemos
       if (error.message?.includes('alreadyAuthenticated') || error.message?.includes('ya posee un TA valido')) {
-        this.logger.warn('AFIP reporta ticket ya autenticado, esperando 2 segundos y reintentando...');
+        this.logger.warn('AFIP reporta ticket ya autenticado; intentando recuperar desde caché persistido...');
         
-        // Esperar 2 segundos antes de reintentar
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Primero cargar desde disco (por si reiniciamos y teníamos el ticket guardado)
+        await this.loadTicketCacheFromFile();
+        let cached = this.ticketCache.get(cacheKey);
+        if (cached) {
+          const now = new Date();
+          const margin = 5 * 60 * 1000;
+          const expiresAtWithMargin = new Date(cached.expiresAt.getTime() - margin);
+          if (now < expiresAtWithMargin) {
+            this.logger.log('Usando ticket recuperado del caché persistido');
+            return cached.ticket;
+          }
+        }
         
-        // Intentar obtener del cache nuevamente
-        const certHash = crypto.createHash('sha256').update(certificado).digest('hex').substring(0, 16);
-        const cacheKey = `${service}_${certHash}_${homologacion ? 'homo' : 'prod'}`;
-        const cached = this.ticketCache.get(cacheKey);
+        // Esperar antes de reintentar (AFIP puede tardar en liberar)
+        await new Promise(resolve => setTimeout(resolve, 3000));
         
+        cached = this.ticketCache.get(cacheKey);
         if (cached) {
           const now = new Date();
           const margin = 5 * 60 * 1000;
@@ -191,10 +274,47 @@ export class AfipService {
           }
         }
         
-        // Si no hay cache válido, lanzar error
-        throw new BadRequestException(
-          'AFIP ya tiene un ticket válido para este servicio. Espera unos segundos e intenta nuevamente.',
-        );
+        // Reintentar una vez más después de esperar
+        this.logger.log('Reintentando obtención de ticket...');
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        try {
+          const tra = this.createTRA(service);
+          const signedTra = this.signTRA(tra, certificado, clavePrivada);
+          const urls = this.getAfipUrls(homologacion);
+          const ticket = await this.callWSAA(signedTra, urls.wsaa);
+          
+          // Guardar en cache (memoria + disco)
+          const expirationDate = this.parseAfipDate(ticket.expirationTime);
+          this.ticketCache.set(cacheKey, {
+            ticket,
+            expiresAt: expirationDate,
+          });
+          this.persistTicketCache();
+
+          this.logger.log('Ticket obtenido en reintento');
+          return ticket;
+        } catch (retryError: any) {
+          // Si sigue fallando, intentar cargar desde disco (por si había ticket antes del reinicio)
+          await this.loadTicketCacheFromFile();
+          const cachedRetry = this.ticketCache.get(cacheKey);
+          if (cachedRetry) {
+            const now = new Date();
+            const margin = 5 * 60 * 1000;
+            const expiresAtWithMargin = new Date(cachedRetry.expiresAt.getTime() - margin);
+            
+            if (now < expiresAtWithMargin) {
+              this.logger.log('Usando ticket del cache después de segundo reintento fallido');
+              return cachedRetry.ticket;
+            }
+          }
+          
+          throw new BadRequestException(
+            'AFIP indica que ya existe un ticket válido pero no se pudo recuperar. ' +
+            'Esto puede ocurrir si hay múltiples requests simultáneas. ' +
+            'Por favor, espera unos segundos e intenta nuevamente.',
+          );
+        }
       }
       
       this.logger.error(`Error al obtener ticket: ${error.message}`);
@@ -225,11 +345,64 @@ export class AfipService {
       const entries = Array.from(this.ticketCache.entries());
       entries.sort((a, b) => a[1].expiresAt.getTime() - b[1].expiresAt.getTime());
       
-      // Eliminar las 50 más antiguas
       for (let i = 0; i < 50 && i < entries.length; i++) {
         this.ticketCache.delete(entries[i][0]);
       }
     }
+
+    this.persistTicketCache();
+  }
+
+  /**
+   * Carga el caché de tickets desde disco (al iniciar o tras alreadyAuthenticated).
+   * Sobrevive reinicios del servidor para no pedir un TA nuevo si ya teníamos uno válido.
+   */
+  private async loadTicketCacheFromFile(): Promise<void> {
+    if (!this.ticketCacheFilePath) return;
+    try {
+      const data = await fs.promises.readFile(this.ticketCacheFilePath, 'utf8');
+      const parsed: PersistedTicketCache = JSON.parse(data);
+      const now = new Date();
+      const margin = 5 * 60 * 1000; // 5 min margen
+      let loaded = 0;
+      for (const [key, item] of Object.entries(parsed)) {
+        const expiresAt = new Date(item.expiresAt);
+        if (now.getTime() < expiresAt.getTime() - margin) {
+          this.ticketCache.set(key, { ticket: item.ticket, expiresAt });
+          loaded++;
+        }
+      }
+      if (loaded > 0) {
+        this.logger.log(`Caché de tickets AFIP: cargados ${loaded} ticket(s) desde ${this.ticketCacheFilePath}`);
+      }
+    } catch (err: any) {
+      if (err.code !== 'ENOENT') {
+        this.logger.warn(`No se pudo cargar caché de tickets: ${err.message}`);
+      }
+    }
+  }
+
+  /**
+   * Persiste el caché de tickets en disco para sobrevivir reinicios.
+   */
+  private persistTicketCache(): void {
+    if (!this.ticketCacheFilePath || this.ticketCache.size === 0) return;
+    const obj: PersistedTicketCache = {};
+    for (const [key, cached] of this.ticketCache.entries()) {
+      const expiresAt = cached.expiresAt;
+      // Evitar Invalid time value si la fecha no se parseó bien
+      const expiresAtStr = expiresAt instanceof Date && Number.isFinite(expiresAt.getTime())
+        ? expiresAt.toISOString()
+        : new Date(Date.now() + 11 * 60 * 60 * 1000).toISOString(); // fallback: +11h
+      obj[key] = {
+        ticket: cached.ticket,
+        expiresAt: expiresAtStr,
+      };
+    }
+    const payload = JSON.stringify(obj, null, 0);
+    this.persistWritePromise = this.persistWritePromise
+      .then(() => fs.promises.writeFile(this.ticketCacheFilePath!, payload, 'utf8'))
+      .catch((err) => this.logger.warn(`No se pudo guardar caché de tickets: ${err.message}`));
   }
 
   /**
@@ -435,6 +608,26 @@ export class AfipService {
   }
 
   /**
+   * Parsea fecha devuelta por AFIP (ISO o formato compacto YYYYMMDDTHHmmss) a Date válido.
+   */
+  private parseAfipDate(value: string): Date {
+    if (!value || typeof value !== 'string') {
+      return new Date(Date.now() + 11 * 60 * 60 * 1000);
+    }
+    const trimmed = value.trim();
+    let d = new Date(trimmed);
+    if (Number.isFinite(d.getTime())) return d;
+    // Formato compacto: 20260203172557 o 20260203T172557
+    const match = trimmed.match(/^(\d{4})(\d{2})(\d{2})[T\s]?(\d{2})?(\d{2})?(\d{2})?/);
+    if (match) {
+      const [, y, mo, day, h = '00', mi = '00', s = '00'] = match;
+      d = new Date(Date.UTC(parseInt(y!, 10), parseInt(mo!, 10) - 1, parseInt(day!, 10), parseInt(h, 10), parseInt(mi, 10), parseInt(s, 10)));
+      if (Number.isFinite(d.getTime())) return d;
+    }
+    return new Date(Date.now() + 11 * 60 * 60 * 1000);
+  }
+
+  /**
    * Parsea la respuesta XML del WSAA para extraer el ticket
    */
   private async parseTicketResponse(xmlResponse: string): Promise<AfipTicketDto> {
@@ -452,11 +645,15 @@ export class AfipService {
             throw new Error('Formato de respuesta inválido');
           }
 
+          // xml2js puede devolver valores como string o como objeto { _: "valor" }
+          const str = (v: any): string =>
+            typeof v === 'string' ? v : (v && (v._ ?? v['#text'] ?? v)) ? String(v._ ?? v['#text'] ?? v) : '';
+
           const ticket: AfipTicketDto = {
-            token: credentials.token,
-            sign: credentials.sign,
-            expirationTime: credentials.expirationTime,
-            generationTime: credentials.generationTime,
+            token: str(credentials.token),
+            sign: str(credentials.sign),
+            expirationTime: str(credentials.expirationTime),
+            generationTime: str(credentials.generationTime),
           };
 
           resolve(ticket);
@@ -515,7 +712,7 @@ export class AfipService {
     tipoComprobante: number,
     ticket: AfipTicketDto,
     cuit: string,
-    homologacion: boolean = true,
+    homologacion: boolean = false,
   ): Promise<{ CbteNro: number; CbteFch: string }> {
     this.logger.log('=== INICIO getUltimoAutorizado ===');
     this.logger.log(`Punto de venta: ${puntoVenta}`);
@@ -709,7 +906,7 @@ export class AfipService {
       }
 
       const cuitEmisor = cuitEmisorRaw.replace(/-/g, ''); // Remover guiones
-      const homologacion = consultaDto.homologacion !== undefined ? consultaDto.homologacion : true;
+      const homologacion = consultaDto.homologacion !== undefined ? consultaDto.homologacion : false;
 
       // Obtener ticket del servicio de Constancia de Inscripción
       // ID del servicio según manual v3.4: ws_sr_constancia_inscripcion
@@ -1029,7 +1226,7 @@ export class AfipService {
       }
 
       const cuitEmisor = cuitEmisorRaw.replace(/-/g, ''); // Remover guiones si los tiene
-      const homologacion = invoiceData.homologacion !== undefined ? invoiceData.homologacion : true;
+      const homologacion = invoiceData.homologacion !== undefined ? invoiceData.homologacion : false;
       this.logger.log(`CUIT Emisor: ${cuitEmisor}`);
       this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
@@ -1639,7 +1836,7 @@ export class AfipService {
     cuitEmisor: string,
     certificado: string,
     clavePrivada: string,
-    homologacion: boolean = true,
+    homologacion: boolean = false,
   ): Promise<Array<{ Id: number; Desc: string; FchDesde: string; FchHasta: string }>> {
     const ticket = await this.getTicket('wsfe', certificado, clavePrivada, homologacion);
     const urls = this.getAfipUrls(homologacion);
@@ -1681,7 +1878,7 @@ export class AfipService {
     cuitEmisor: string,
     certificado: string,
     clavePrivada: string,
-    homologacion: boolean = true,
+    homologacion: boolean = false,
   ): Promise<Array<{ Nro: number; EmisionTipo: string; Bloqueado: string; FchBaja: string }>> {
     const ticket = await this.getTicket('wsfe', certificado, clavePrivada, homologacion);
     const urls = this.getAfipUrls(homologacion);
@@ -1724,7 +1921,7 @@ export class AfipService {
     certificado: string,
     clavePrivada: string,
     claseComprobante?: string, // A, B, C, M
-    homologacion: boolean = true,
+    homologacion: boolean = false,
   ): Promise<Array<{ Id: number; Desc: string; Cmp_Clase: string }>> {
     const ticket = await this.getTicket('wsfe', certificado, clavePrivada, homologacion);
     const urls = this.getAfipUrls(homologacion);
@@ -1793,7 +1990,7 @@ export class AfipService {
     },
     pagina: number = 1,
     itemsPorPagina: number = 20,
-    homologacion: boolean = true,
+    homologacion: boolean = false,
   ): Promise<{
     paginacion: {
       pagina: number;
@@ -1950,7 +2147,7 @@ export class AfipService {
     clavePrivada: string,
     idComunicacion: number,
     incluirAdjuntos: boolean = false,
-    homologacion: boolean = true,
+    homologacion: boolean = false,
   ): Promise<{
     idComunicacion: number;
     cuitDestinatario: string;
@@ -2071,7 +2268,7 @@ export class AfipService {
     certificado: string,
     clavePrivada: string,
     idSistemaPublicador?: number,
-    homologacion: boolean = true,
+    homologacion: boolean = false,
   ): Promise<Array<{
     id: number;
     descripcion: string;
@@ -2145,7 +2342,7 @@ export class AfipService {
     cuitRepresentada: string,
     certificado: string,
     clavePrivada: string,
-    homologacion: boolean = true,
+    homologacion: boolean = false,
   ): Promise<Array<{
     codigo: number;
     descripcion: string;
@@ -2249,7 +2446,7 @@ export class AfipService {
     tipoComprobante: number,
     numeroComprobante: number,
     cuitEmisorComprobante?: string,
-    homologacion: boolean = true,
+    homologacion: boolean = false,
   ): Promise<{
     resultado: string;
     codigoAutorizacion?: string;
@@ -2374,7 +2571,7 @@ export class AfipService {
     cuitEmisor: string,
     certificado: string,
     clavePrivada: string,
-    homologacion: boolean = true,
+    homologacion: boolean = false,
   ): Promise<{
     modalidades: Array<{ Id: number; Desc: string; FchDesde: string; FchHasta?: string }>;
     errors?: Array<{ code: number; msg: string }>;
@@ -2458,7 +2655,7 @@ export class AfipService {
     cuitEmisor: string,
     certificado: string,
     clavePrivada: string,
-    homologacion: boolean = true,
+    homologacion: boolean = false,
   ): Promise<{
     tipos: Array<{ Id: number; Desc: string; FchDesde: string; FchHasta?: string }>;
     errors?: Array<{ code: number; msg: string }>;
@@ -2540,7 +2737,7 @@ export class AfipService {
     cuitEmisor: string,
     certificado: string,
     clavePrivada: string,
-    homologacion: boolean = true,
+    homologacion: boolean = false,
   ): Promise<{
     tipos: Array<{ Id: number; Desc: string; FchDesde: string; FchHasta?: string }>;
     errors?: Array<{ code: number; msg: string }>;
@@ -2622,7 +2819,7 @@ export class AfipService {
     cuitEmisor: string,
     certificado: string,
     clavePrivada: string,
-    homologacion: boolean = true,
+    homologacion: boolean = false,
   ): Promise<{
     tipos: Array<{ Id: string; Desc: string; FchDesde: string; FchHasta?: string }>;
     errors?: Array<{ code: number; msg: string }>;
@@ -2701,7 +2898,7 @@ export class AfipService {
    * Método Dummy para verificar funcionamiento de infraestructura
    * No requiere autenticación
    */
-  async comprobanteDummy(homologacion: boolean = true): Promise<{
+  async comprobanteDummy(homologacion: boolean = false): Promise<{
     appServer: string;
     dbServer: string;
     authServer: string;

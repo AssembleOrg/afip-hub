@@ -62,6 +62,8 @@ export default () => ({
     certPath: process.env.AFIP_CERT_PATH || '',
     keyPath: process.env.AFIP_KEY_PATH || '',
     cuit: process.env.AFIP_CUIT || '',
+    /** Ruta del archivo para persistir caché de tickets AFIP (sobrevive reinicios). Vacío = no persistir. */
+    ticketCachePath: process.env.AFIP_TICKET_CACHE_PATH || '',
   },
   timezone: 'America/Argentina/Buenos_Aires', // GMT-3
 });

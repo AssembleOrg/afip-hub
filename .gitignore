@@ -37,6 +37,9 @@ lerna-debug.log*
 !.vscode/launch.json
 !.vscode/extensions.json
 
+# AFIP ticket cache (contiene tokens; no versionar)
+.afip-ticket-cache.json
+
 # dotenv environment variable files
 .env
 .env.development.local

@@ -381,13 +381,13 @@ export class CreateInvoiceDto {
   clavePrivada: string;
 
   @ApiPropertyOptional({ 
-    description: 'Usar entorno de homologación (true) o producción (false). Default: true (homologación)',
-    example: true,
-    default: true
+    description: 'Usar entorno de homologación/testing (true) o producción (false). Default: false (producción, facturas reales)',
+    example: false,
+    default: false
   })
   @IsOptional()
   @IsBoolean()
-  @Transform(({ value }) => value === 'true' || value === true || value === undefined || value === null)
+  @Transform(({ value }) => value === 'true' || value === true)
   homologacion?: boolean;
 }
 

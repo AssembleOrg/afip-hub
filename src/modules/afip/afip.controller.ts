@@ -155,7 +155,7 @@ Crea un comprobante electrónico (factura, nota de crédito, nota de débito, et
     try {
       // Obtener ticket primero usando los certificados del request
       const dto = ultimoAutorizadoDto as any;
-      const homologacion = ultimoAutorizadoDto.homologacion !== undefined ? ultimoAutorizadoDto.homologacion : true;
+      const homologacion = ultimoAutorizadoDto.homologacion !== undefined ? ultimoAutorizadoDto.homologacion : false;
       const ticket = await this.afipService.getTicket(
         'wsfe',
         dto.certificado,
@@ -240,7 +240,7 @@ Crea un comprobante electrónico (factura, nota de crédito, nota de débito, et
   async getTiposComprobante(
     @Body() paramsDto: AfipParamsRequestDto,
   ): Promise<ResponseDto<TipoComprobanteResponseDto[]>> {
-    const homologacion = paramsDto.homologacion !== undefined ? paramsDto.homologacion : true;
+    const homologacion = paramsDto.homologacion !== undefined ? paramsDto.homologacion : false;
     const tipos = await this.afipService.getTiposComprobante(
       paramsDto.cuitEmisor,
       paramsDto.certificado,
@@ -265,7 +265,7 @@ Crea un comprobante electrónico (factura, nota de crédito, nota de débito, et
   async getPuntosVenta(
     @Body() paramsDto: AfipParamsRequestDto,
   ): Promise<ResponseDto<PuntoVentaResponseDto[]>> {
-    const homologacion = paramsDto.homologacion !== undefined ? paramsDto.homologacion : true;
+    const homologacion = paramsDto.homologacion !== undefined ? paramsDto.homologacion : false;
     const puntos = await this.afipService.getPuntosVenta(
       paramsDto.cuitEmisor,
       paramsDto.certificado,
@@ -300,7 +300,7 @@ Si no se especifica la clase, devuelve todas las combinaciones posibles.
   async getCondicionesIva(
     @Body() paramsDto: CondicionesIvaRequestDto,
   ): Promise<ResponseDto<CondicionIvaReceptorResponseDto[]>> {
-    const homologacion = paramsDto.homologacion !== undefined ? paramsDto.homologacion : true;
+    const homologacion = paramsDto.homologacion !== undefined ? paramsDto.homologacion : false;
     const condiciones = await this.afipService.getCondicionesIvaReceptor(
       paramsDto.cuitEmisor,
       paramsDto.certificado,
@@ -396,7 +396,7 @@ Este endpoint no requiere autenticación con AFIP, solo genera los datos del QR.
   async consultarComunicaciones(
     @Body() dto: ConsultarComunicacionesDto,
   ): Promise<ResponseDto<ComunicacionesPaginadasResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
     const result = await this.afipService.consultarComunicaciones(
       dto.cuitRepresentada,
       dto.certificado,
@@ -426,7 +426,7 @@ Este endpoint no requiere autenticación con AFIP, solo genera los datos del QR.
   async consumirComunicacion(
     @Body() dto: ConsumirComunicacionDto,
   ): Promise<ResponseDto<ComunicacionDetalleResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
     const result = await this.afipService.consumirComunicacion(
       dto.cuitRepresentada,
       dto.certificado,
@@ -453,7 +453,7 @@ Este endpoint no requiere autenticación con AFIP, solo genera los datos del QR.
   async consultarSistemasPublicadores(
     @Body() dto: ConsultarSistemasPublicadoresDto,
   ): Promise<ResponseDto<SistemasPublicadoresResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
     const sistemas = await this.afipService.consultarSistemasPublicadores(
       dto.cuitRepresentada,
       dto.certificado,
@@ -479,7 +479,7 @@ Este endpoint no requiere autenticación con AFIP, solo genera los datos del QR.
   async consultarEstadosComunicacion(
     @Body() dto: ConsultarEstadosDto,
   ): Promise<ResponseDto<EstadosComunicacionResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
     const estados = await this.afipService.consultarEstadosComunicacion(
       dto.cuitRepresentada,
       dto.certificado,
@@ -509,7 +509,7 @@ Este endpoint no requiere autenticación con AFIP, solo genera los datos del QR.
   async constatarComprobante(
     @Body() dto: ComprobanteConstatarDto,
   ): Promise<ResponseDto<ComprobanteConstatarResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
     const result = await this.afipService.constatarComprobante(
       dto.cuitEmisor,
       dto.certificado,
@@ -538,7 +538,7 @@ Este endpoint no requiere autenticación con AFIP, solo genera los datos del QR.
   async consultarModalidadesComprobante(
     @Body() dto: ComprobantesModalidadConsultarDto,
   ): Promise<ResponseDto<ModalidadResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
     const result = await this.afipService.consultarModalidadesComprobante(
       dto.cuitEmisor,
       dto.certificado,
@@ -563,7 +563,7 @@ Este endpoint no requiere autenticación con AFIP, solo genera los datos del QR.
   async consultarTiposComprobanteWscdc(
     @Body() dto: ComprobantesTipoConsultarDto,
   ): Promise<ResponseDto<TipoComprobanteWscdcResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
     const result = await this.afipService.consultarTiposComprobanteWscdc(
       dto.cuitEmisor,
       dto.certificado,
@@ -588,7 +588,7 @@ Este endpoint no requiere autenticación con AFIP, solo genera los datos del QR.
   async consultarTiposDocumento(
     @Body() dto: DocumentosTipoConsultarDto,
   ): Promise<ResponseDto<TipoDocumentoResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
     const result = await this.afipService.consultarTiposDocumento(
       dto.cuitEmisor,
       dto.certificado,
@@ -613,7 +613,7 @@ Este endpoint no requiere autenticación con AFIP, solo genera los datos del QR.
   async consultarTiposOpcionales(
     @Body() dto: OpcionalesTipoConsultarDto,
   ): Promise<ResponseDto<TipoOpcionalResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : true;
+    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
     const result = await this.afipService.consultarTiposOpcionales(
       dto.cuitEmisor,
       dto.certificado,
@@ -639,7 +639,7 @@ Este endpoint no requiere autenticación con AFIP, solo genera los datos del QR.
     @Query('homologacion') homologacion?: string,
   ): Promise<ResponseDto<DummyResponseDto>> {
     // Convertir query param a boolean (default: true)
-    const useHomologacion = homologacion === undefined || homologacion === 'true' || homologacion === '';
+    const useHomologacion = homologacion === 'true';
     const result = await this.afipService.comprobanteDummy(useHomologacion);
 
     return new ResponseDto(result as DummyResponseDto, 'Estado de infraestructura obtenido exitosamente');
