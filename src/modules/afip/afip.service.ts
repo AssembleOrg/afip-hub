@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import * as xml2js from 'xml2js';
+import * as crypto from 'crypto';
 import { AfipTicketDto } from './dto';
 import { 
   CreateInvoiceDto, 
@@ -18,10 +19,19 @@ import {
 import { InvoiceResponseDto, QrDataDto } from './dto/invoice-response.dto';
 import { ConsultarContribuyenteDto, ContribuyenteResponseDto } from './dto/consultar-contribuyente.dto';
 
+interface CachedTicket {
+  ticket: AfipTicketDto;
+  expiresAt: Date;
+}
+
 @Injectable()
 export class AfipService {
   private readonly logger = new Logger(AfipService.name);
   private wsaaUrl: string;
+  
+  // Cache de tickets para evitar solicitudes duplicadas a AFIP
+  // Clave: service + hash(certificado) + homologacion
+  private ticketCache: Map<string, CachedTicket> = new Map();
 
   // URLs por defecto según entorno
   private readonly AFIP_URLS = {
@@ -94,6 +104,30 @@ export class AfipService {
     homologacion: boolean = true,
   ): Promise<AfipTicketDto> {
     try {
+      // Generar clave única para el cache: service + hash(certificado) + entorno
+      const certHash = crypto.createHash('sha256').update(certificado).digest('hex').substring(0, 16);
+      const cacheKey = `${service}_${certHash}_${homologacion ? 'homo' : 'prod'}`;
+
+      // Verificar si hay un ticket válido en cache
+      const cached = this.ticketCache.get(cacheKey);
+      if (cached) {
+        const now = new Date();
+        // Verificar si el ticket sigue siendo válido (con margen de 5 minutos)
+        const margin = 5 * 60 * 1000; // 5 minutos en milisegundos
+        const expiresAtWithMargin = new Date(cached.expiresAt.getTime() - margin);
+        
+        if (now < expiresAtWithMargin) {
+          this.logger.log(`=== TICKET DESDE CACHE ===`);
+          this.logger.log(`Servicio: ${service}, Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
+          this.logger.log(`Válido hasta: ${cached.expiresAt.toISOString()}`);
+          return cached.ticket;
+        } else {
+          // Ticket expirado, remover del cache
+          this.logger.log(`Ticket en cache expirado, solicitando nuevo...`);
+          this.ticketCache.delete(cacheKey);
+        }
+      }
+
       this.logger.log(`=== INICIO OBTENCIÓN DE TICKET ===`);
       this.logger.log(`Servicio solicitado: ${service}`);
       this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
@@ -116,6 +150,16 @@ export class AfipService {
       const urls = this.getAfipUrls(homologacion);
       const ticket = await this.callWSAA(signedTra, urls.wsaa);
 
+      // Guardar en cache
+      const expirationDate = new Date(ticket.expirationTime);
+      this.ticketCache.set(cacheKey, {
+        ticket,
+        expiresAt: expirationDate,
+      });
+
+      // Limpiar tickets expirados del cache (mantener solo los últimos 100)
+      this.cleanExpiredTickets();
+
       this.logger.log(`=== TICKET OBTENIDO ===`);
       this.logger.log(`Token (primeros 50 caracteres): ${ticket.token.substring(0, 50)}...`);
       this.logger.log(`Válido desde: ${ticket.generationTime}`);
@@ -124,11 +168,67 @@ export class AfipService {
 
       return ticket;
     } catch (error: any) {
+      // Si el error es "alreadyAuthenticated", intentar usar cache o esperar
+      if (error.message?.includes('alreadyAuthenticated') || error.message?.includes('ya posee un TA valido')) {
+        this.logger.warn('AFIP reporta ticket ya autenticado, esperando 2 segundos y reintentando...');
+        
+        // Esperar 2 segundos antes de reintentar
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        // Intentar obtener del cache nuevamente
+        const certHash = crypto.createHash('sha256').update(certificado).digest('hex').substring(0, 16);
+        const cacheKey = `${service}_${certHash}_${homologacion ? 'homo' : 'prod'}`;
+        const cached = this.ticketCache.get(cacheKey);
+        
+        if (cached) {
+          const now = new Date();
+          const margin = 5 * 60 * 1000;
+          const expiresAtWithMargin = new Date(cached.expiresAt.getTime() - margin);
+          
+          if (now < expiresAtWithMargin) {
+            this.logger.log('Usando ticket del cache después de error alreadyAuthenticated');
+            return cached.ticket;
+          }
+        }
+        
+        // Si no hay cache válido, lanzar error
+        throw new BadRequestException(
+          'AFIP ya tiene un ticket válido para este servicio. Espera unos segundos e intenta nuevamente.',
+        );
+      }
+      
       this.logger.error(`Error al obtener ticket: ${error.message}`);
       this.logger.error(`Stack: ${error.stack}`);
       throw new BadRequestException(
         `Error al obtener ticket de AFIP: ${error.message}`,
       );
+    }
+  }
+
+  /**
+   * Limpia tickets expirados del cache para evitar acumulación de memoria
+   */
+  private cleanExpiredTickets(): void {
+    const now = new Date();
+    const keysToDelete: string[] = [];
+
+    for (const [key, cached] of this.ticketCache.entries()) {
+      if (now >= cached.expiresAt) {
+        keysToDelete.push(key);
+      }
+    }
+
+    keysToDelete.forEach(key => this.ticketCache.delete(key));
+
+    // Si el cache tiene más de 100 entradas, limpiar las más antiguas
+    if (this.ticketCache.size > 100) {
+      const entries = Array.from(this.ticketCache.entries());
+      entries.sort((a, b) => a[1].expiresAt.getTime() - b[1].expiresAt.getTime());
+      
+      // Eliminar las 50 más antiguas
+      for (let i = 0; i < 50 && i < entries.length; i++) {
+        this.ticketCache.delete(entries[i][0]);
+      }
     }
   }
 
