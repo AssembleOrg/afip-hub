@@ -4,14 +4,14 @@
  * PRODUCCIÓN (facturas reales, fiscalmente válidas):
  * - WSAA: https://wsaa.afip.gov.ar/ws/services/LoginCms?WSDL
  * - WSFE: https://servicios1.afip.gov.ar/wsfev1/service.asmx?WSDL
- * - Padrón: https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA5?WSDL
+ * - Padrón A13: https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA13?WSDL
  * - Ventanilla Electrónica: https://infraestructura.afip.gob.ar/ve-ws/services/veconsumer?wsdl
  * - WSCDC: https://servicios1.arca.gov.ar/WSCDC/service.asmx?WSDL
- * 
+ *
  * HOMOLOGACIÓN (testing, sin efecto fiscal):
  * - WSAA: https://wsaahomo.afip.gov.ar/ws/services/LoginCms?WSDL
  * - WSFE: https://wswhomo.afip.gov.ar/wsfev1/service.asmx?WSDL
- * - Padrón: https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA5?WSDL
+ * - Padrón A13: https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA13?WSDL
  * - Ventanilla Electrónica: https://stable-middleware-tecno-ext.afip.gob.ar/ve-ws/services/veconsumer?wsdl
  * - WSCDC: https://wswhomo.arca.gov.ar/WSCDC/service.asmx?WSDL
  */
