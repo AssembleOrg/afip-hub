@@ -1,11 +1,12 @@
 import { Module } from '@nestjs/common';
 import { AfipService } from './afip.service';
 import { AfipController } from './afip.controller';
+import { InvoicePdfService } from './invoice-pdf.service';
 
 @Module({
   controllers: [AfipController],
-  providers: [AfipService],
-  exports: [AfipService],
+  providers: [AfipService, InvoicePdfService],
+  exports: [AfipService, InvoicePdfService],
 })
 export class AfipModule {}
 

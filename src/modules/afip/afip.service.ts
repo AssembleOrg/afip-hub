@@ -1306,12 +1306,12 @@ export class AfipService implements OnModuleInit {
       }
 
       // Fecha: AFIP no permite fecha anterior a la del último comprobante
-      let fechaCbte = invoiceData.fechaComprobante;
+      const fechaCbte = invoiceData.fechaComprobante;
       if (ultimaFecha && fechaCbte < ultimaFecha) {
-        this.logger.warn(
-          `La fecha enviada (${fechaCbte}) es anterior a la del último comprobante (${ultimaFecha}). Usando ${ultimaFecha}.`,
+        throw new BadRequestException(
+          `La fecha del comprobante (${fechaCbte}) no puede ser anterior a la del último comprobante autorizado (${ultimaFecha}). ` +
+          `AFIP solo permite fechas iguales o posteriores al último comprobante emitido para este punto de venta y tipo de comprobante.`,
         );
-        fechaCbte = ultimaFecha;
       }
 
       this.logger.log(`Usando número de comprobante: ${numeroAUsar}`);

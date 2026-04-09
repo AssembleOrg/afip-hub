@@ -1,3 +1,5 @@
+const CopyPlugin = require('copy-webpack-plugin');
+
 module.exports = function (options, webpack) {
   const lazyImports = [
     '@nestjs/microservices/microservices-module',
@@ -36,6 +38,11 @@ module.exports = function (options, webpack) {
     },
     plugins: [
       ...options.plugins,
+      new CopyPlugin({
+        patterns: [
+          { from: 'src/**/*.hbs', to: '[path][name][ext]', context: '.' },
+        ],
+      }),
       new webpack.IgnorePlugin({
         checkResource(resource) {
           if (lazyImports.includes(resource)) {

@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #000; padding: 20px 30px; }
+
+  /* === ENCABEZADO === */
+  .header { display: flex; border: 2px solid #000; margin-bottom: 8px; }
+  .header-left { flex: 1; padding: 12px 15px; }
+  .header-left .razon-social { font-size: 18px; font-weight: bold; margin-bottom: 4px; }
+  .header-left .domicilio { font-size: 9px; color: #333; }
+
+  .header-letra { width: 70px; display: flex; flex-direction: column; align-items: center; justify-content: center; border-left: 2px solid #000; border-right: 2px solid #000; padding: 5px; }
+  .header-letra .letra { font-size: 36px; font-weight: bold; line-height: 1; }
+  .header-letra .cod { font-size: 8px; color: #555; margin-top: 2px; }
+
+  .header-right { flex: 1; padding: 12px 15px; text-align: right; }
+  .header-right .tipo-comprobante { font-size: 16px; font-weight: bold; margin-bottom: 4px; }
+  .header-right .numero { font-size: 13px; margin-bottom: 2px; }
+  .header-right .fecha { font-size: 10px; color: #333; }
+
+  /* === DATOS EMISOR / RECEPTOR === */
+  .datos-section { display: flex; border: 1px solid #000; margin-bottom: 8px; }
+  .datos-emisor, .datos-receptor { flex: 1; padding: 10px 12px; font-size: 10px; line-height: 1.6; }
+  .datos-emisor { border-right: 1px solid #000; }
+  .datos-label { font-weight: bold; }
+
+  /* === PERIODO === */
+  .periodo-row { border: 1px solid #000; border-top: none; margin-top: -9px; margin-bottom: 8px; padding: 6px 12px; font-size: 10px; display: flex; gap: 25px; }
+
+  /* === TABLA DE ITEMS === */
+  .items-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+  .items-table th { background: #e8e8e8; border: 1px solid #000; padding: 5px 6px; font-size: 9px; font-weight: bold; text-align: center; }
+  .items-table td { border: 1px solid #ccc; padding: 4px 6px; font-size: 9px; }
+  .items-table td.text-right { text-align: right; }
+  .items-table td.text-center { text-align: center; }
+  .items-table tbody tr:last-child td { border-bottom: 1px solid #000; }
+
+  /* === TOTALES === */
+  .totales { display: flex; justify-content: flex-end; margin-bottom: 10px; }
+  .totales-table { width: 280px; }
+  .totales-table .total-row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 10px; }
+  .totales-table .total-row.total-final { border-top: 2px solid #000; font-size: 14px; font-weight: bold; padding-top: 6px; margin-top: 4px; }
+
+  /* === OBSERVACIONES === */
+  .observaciones { border: 1px solid #ccc; padding: 6px 10px; margin-bottom: 10px; font-size: 9px; }
+  .observaciones .obs-label { font-weight: bold; }
+
+  /* === PIE: CAE + QR === */
+  .footer-cae { display: flex; border: 2px solid #000; margin-top: 15px; }
+  .footer-qr { width: 130px; display: flex; align-items: center; justify-content: center; padding: 8px; border-right: 1px solid #000; }
+  .footer-qr img { width: 110px; height: 110px; }
+  .footer-info { flex: 1; padding: 12px 15px; display: flex; flex-direction: column; justify-content: center; }
+  .footer-info .cae-line { font-size: 12px; margin-bottom: 4px; }
+  .footer-info .cae-label { font-weight: bold; }
+  .footer-info .legal { font-size: 8px; color: #555; font-style: italic; margin-top: 10px; }
+</style>
+</head>
+<body>
+
+  <!-- ENCABEZADO -->
+  <div class="header">
+    <div class="header-left">
+      <div class="razon-social">{{emisor.razonSocial}}</div>
+      <div class="domicilio">{{emisor.domicilio}}</div>
+    </div>
+    <div class="header-letra">
+      <div class="letra">{{letra}}</div>
+      <div class="cod">Cod. {{codigoComprobante}}</div>
+    </div>
+    <div class="header-right">
+      <div class="tipo-comprobante">{{tipoComprobante}}</div>
+      <div class="numero">Nro: {{puntoVentaStr}}-{{numeroComprobanteStr}}</div>
+      <div class="fecha">Fecha de emisión: {{fechaEmision}}</div>
+    </div>
+  </div>
+
+  <!-- DATOS EMISOR / RECEPTOR -->
+  <div class="datos-section">
+    <div class="datos-emisor">
+      <div><span class="datos-label">CUIT:</span> {{emisor.cuitFormateado}}</div>
+      <div><span class="datos-label">Condición frente al IVA:</span> {{emisor.condicionIva}}</div>
+      {{#if emisor.iibb}}<div><span class="datos-label">IIBB:</span> {{emisor.iibb}}</div>{{/if}}
+      {{#if emisor.inicioActividades}}<div><span class="datos-label">Inicio de Actividades:</span> {{emisor.inicioActividades}}</div>{{/if}}
+      {{#if condicionVenta}}<div><span class="datos-label">Condición de venta:</span> {{condicionVenta}}</div>{{/if}}
+    </div>
+    <div class="datos-receptor">
+      <div><span class="datos-label">Razón Social:</span> {{receptor.razonSocial}}</div>
+      <div><span class="datos-label">{{receptor.tipoDocumento}}:</span> {{receptor.documentoFormateado}}</div>
+      <div><span class="datos-label">Condición frente al IVA:</span> {{receptor.condicionIva}}</div>
+      {{#if receptor.domicilio}}<div><span class="datos-label">Domicilio:</span> {{receptor.domicilio}}</div>{{/if}}
+    </div>
+  </div>
+
+  {{#if tienePeriodo}}
+  <div class="periodo-row">
+    {{#if periodoDesde}}<div><span class="datos-label">Período desde:</span> {{periodoDesde}}</div>{{/if}}
+    {{#if periodoHasta}}<div><span class="datos-label">Período hasta:</span> {{periodoHasta}}</div>{{/if}}
+    {{#if fechaVencimientoPago}}<div><span class="datos-label">Vto. Pago:</span> {{fechaVencimientoPago}}</div>{{/if}}
+  </div>
+  {{/if}}
+
+  <!-- DETALLE DE ITEMS -->
+  <table class="items-table">
+    <thead>
+      <tr>
+        <th>Código</th>
+        <th>Descripción</th>
+        <th>Cantidad</th>
+        <th>U. Medida</th>
+        <th>Precio Unit.</th>
+        <th>Bonif.</th>
+        <th>Subtotal</th>
+        {{#if isFacturaA}}
+        <th>IVA %</th>
+        <th>IVA</th>
+        {{/if}}
+      </tr>
+    </thead>
+    <tbody>
+      {{#each items}}
+      <tr>
+        <td class="text-center">{{this.codigo}}</td>
+        <td>{{this.descripcion}}</td>
+        <td class="text-center">{{this.cantidadStr}}</td>
+        <td class="text-center">{{this.unidadStr}}</td>
+        <td class="text-right">{{this.precioUnitarioStr}}</td>
+        <td class="text-center">{{this.bonificacionStr}}</td>
+        <td class="text-right">{{this.subtotalStr}}</td>
+        {{#if ../isFacturaA}}
+        <td class="text-center">{{this.alicuotaIvaStr}}</td>
+        <td class="text-right">{{this.importeIvaStr}}</td>
+        {{/if}}
+      </tr>
+      {{/each}}
+    </tbody>
+  </table>
+
+  <!-- TOTALES -->
+  <div class="totales">
+    <div class="totales-table">
+      {{#if isFacturaA}}
+      <div class="total-row">
+        <span>Importe Neto Gravado:</span>
+        <span>{{importeNetoGravadoStr}}</span>
+      </div>
+      {{#if importeNetoNoGravado}}
+      <div class="total-row">
+        <span>Importe Neto No Gravado:</span>
+        <span>{{importeNetoNoGravadoStr}}</span>
+      </div>
+      {{/if}}
+      {{#if importeExento}}
+      <div class="total-row">
+        <span>Importe Exento:</span>
+        <span>{{importeExentoStr}}</span>
+      </div>
+      {{/if}}
+      {{#if importeIva}}
+      <div class="total-row">
+        <span>IVA:</span>
+        <span>{{importeIvaStr}}</span>
+      </div>
+      {{/if}}
+      {{#if importeTributos}}
+      <div class="total-row">
+        <span>Otros Tributos:</span>
+        <span>{{importeTributosStr}}</span>
+      </div>
+      {{/if}}
+      {{/if}}
+      <div class="total-row total-final">
+        <span>IMPORTE TOTAL:</span>
+        <span>{{importeTotalStr}}</span>
+      </div>
+    </div>
+  </div>
+
+  {{#if observaciones}}
+  <div class="observaciones">
+    <span class="obs-label">Observaciones:</span> {{observaciones}}
+  </div>
+  {{/if}}
+
+  <!-- PIE: CAE + QR -->
+  <div class="footer-cae">
+    <div class="footer-qr">
+      <img src="{{qrDataUrl}}" alt="QR AFIP" />
+    </div>
+    <div class="footer-info">
+      <div class="cae-line"><span class="cae-label">CAE:</span> {{cae}}</div>
+      <div class="cae-line"><span class="cae-label">Fecha Vto. CAE:</span> {{caeFechaVencimiento}}</div>
+      <div class="legal">Comprobante autorizado. Esta factura contribuye al cumplimiento de la Res. Gral. AFIP 4291.</div>
+    </div>
+  </div>
+
+</body>
+</html>

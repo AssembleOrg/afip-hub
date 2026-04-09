@@ -3,6 +3,7 @@ import {
   NestInterceptor,
   ExecutionContext,
   CallHandler,
+  StreamableFile,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
@@ -14,7 +15,12 @@ export class ResponseInterceptor<T> implements NestInterceptor<T, any> {
     return next.handle().pipe(
       map((data) => {
         const response = context.switchToHttp().getResponse();
-        
+
+        // If data is a StreamableFile (binary response like PDF), pass through
+        if (data instanceof StreamableFile) {
+          return data;
+        }
+
         // If data is already a response DTO, return it as is
         if (data instanceof ResponseDto || data instanceof PaginationResponseDto) {
           return data;
