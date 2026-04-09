@@ -57,14 +57,14 @@ export class AfipService implements OnModuleInit {
     production: {
       wsaa: 'https://wsaa.afip.gov.ar/ws/services/LoginCms?WSDL',
       wsfe: 'https://servicios1.afip.gov.ar/wsfev1/service.asmx?WSDL',
-      padron: 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA5?WSDL',
+      padron: 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA13?WSDL',
       ventanilla: 'https://infraestructura.afip.gob.ar/ve-ws/services/veconsumer?wsdl',
       wscdc: 'https://servicios1.arca.gov.ar/WSCDC/service.asmx?WSDL',
     },
     homologacion: {
       wsaa: 'https://wsaahomo.afip.gov.ar/ws/services/LoginCms?WSDL',
       wsfe: 'https://wswhomo.afip.gov.ar/wsfev1/service.asmx?WSDL',
-      padron: 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA5?WSDL',
+      padron: 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA13?WSDL',
       ventanilla: 'https://stable-middleware-tecno-ext.afip.gob.ar/ve-ws/services/veconsumer?wsdl',
       wscdc: 'https://wswhomo.arca.gov.ar/WSCDC/service.asmx?WSDL',
     },
@@ -908,27 +908,23 @@ export class AfipService implements OnModuleInit {
       const cuitEmisor = cuitEmisorRaw.replace(/-/g, ''); // Remover guiones
       const homologacion = consultaDto.homologacion !== undefined ? consultaDto.homologacion : false;
 
-      // Obtener ticket del servicio de Constancia de Inscripción
-      // ID del servicio según manual v3.4: ws_sr_constancia_inscripcion
-      // NOTA: Algunos servicios usan ws_sr_padron_a5 como ID alternativo
-      this.logger.log('Obteniendo ticket del servicio ws_sr_constancia_inscripcion...');
-      let ticket;
-      try {
-        ticket = await this.getTicket('ws_sr_constancia_inscripcion', certificado, clavePrivada, homologacion);
-      } catch (error: any) {
-        // Si falla, intentar con el ID alternativo
-        this.logger.warn(`Error al obtener ticket con ws_sr_constancia_inscripcion: ${error.message}`);
-        this.logger.log('Intentando con ws_sr_padron_a5...');
-        ticket = await this.getTicket('ws_sr_padron_a5', certificado, clavePrivada, homologacion);
-      }
+      // Obtener ticket del servicio Padrón A13 (ws_sr_padron_a13)
+      // A13 es el servicio de padrón más actual que devuelve los datos completos
+      // (denominación, tipoPersona, domicilio, impuestos, actividades, monotributo).
+      this.logger.log('Obteniendo ticket del servicio ws_sr_padron_a13...');
+      const ticket = await this.getTicket(
+        'ws_sr_padron_a13',
+        certificado,
+        clavePrivada,
+        homologacion,
+      );
       this.logger.log(`Ticket obtenido, válido hasta: ${ticket.expirationTime}`);
 
-      // URL del servicio de Constancia de Inscripción
-      // Según manual v3.4: usa personaServiceA5 (aunque el servicio se llama ws_sr_constancia_inscripcion)
+      // URL del servicio Padrón A13 (personaServiceA13)
       const urls = this.getAfipUrls(homologacion);
       const padronUrl = urls.padron;
 
-      this.logger.log(`URL Constancia de Inscripción: ${padronUrl}`);
+      this.logger.log(`URL Padrón A13: ${padronUrl}`);
 
       return new Promise((resolve, reject) => {
         soap.createClient(padronUrl, (err: any, client: any) => {
@@ -1016,61 +1012,39 @@ export class AfipService implements OnModuleInit {
               return;
             }
 
-            // Parsear respuesta según estructura del servicio de Constancia de Inscripción
-            // La respuesta viene en result.personaReturn según el WSDL
-            const personaReturn = result.personaReturn || result;
-            
-            // Loguear la respuesta de forma segura (evitando referencias circulares)
+            // Parsear respuesta del servicio Padrón A13.
+            // El WSDL devuelve { personaReturn: { persona: {...}, errorConstancia? } }.
+            // Algunos clientes SOAP exponen `persona` directo en el root del result.
+            const personaReturn = result?.personaReturn || result || {};
+            const persona =
+              personaReturn.persona || personaReturn.Persona || personaReturn || {};
+
             try {
-              this.logger.log(JSON.stringify(personaReturn, null, 2));
+              this.logger.log('=== personaReturn (Padrón A13) ===');
+              this.logger.log(
+                JSON.stringify(
+                  {
+                    errorConstancia: personaReturn.errorConstancia,
+                    idPersona: persona.idPersona,
+                    tipoPersona: persona.tipoPersona,
+                    estadoClave: persona.estadoClave,
+                    razonSocial: persona.razonSocial,
+                    nombre: persona.nombre,
+                    apellido: persona.apellido,
+                    impuesto: persona.impuesto,
+                    categoria: persona.categoria,
+                    domicilioFiscal: persona.domicilioFiscal,
+                    domicilio: persona.domicilio,
+                  },
+                  null,
+                  2,
+                ),
+              );
             } catch (e) {
-              // Si hay referencias circulares, loguear solo las propiedades principales
-              this.logger.log(`personaReturn (estructura compleja): ${JSON.stringify({
-                hasDatosGenerales: !!personaReturn.datosGenerales,
-                hasDatosRegimenGeneral: !!personaReturn.datosRegimenGeneral,
-                errorConstancia: personaReturn.errorConstancia,
-              }, null, 2)}`);
+              this.logger.log('personaReturn (no serializable)');
             }
 
-            this.logger.log('=== personaReturn (Constancia de Inscripción) ===');
-            // Loguear de forma segura evitando referencias circulares
-            try {
-              // Extraer solo los datos relevantes para evitar referencias circulares
-              const safePersonaReturn = {
-                errorConstancia: personaReturn.errorConstancia,
-                datosGenerales: personaReturn.datosGenerales ? {
-                  tipoPersona: personaReturn.datosGenerales.tipoPersona,
-                  nombre: personaReturn.datosGenerales.nombre,
-                  apellido: personaReturn.datosGenerales.apellido,
-                  razonSocial: personaReturn.datosGenerales.razonSocial,
-                  estadoClave: personaReturn.datosGenerales.estadoClave,
-                  fechaInscripcion: personaReturn.datosGenerales.fechaInscripcion,
-                  domicilio: personaReturn.datosGenerales.domicilio ? 
-                    personaReturn.datosGenerales.domicilio.map((dom: any) => ({
-                      direccion: dom.direccion,
-                      localidad: dom.localidad,
-                      descripcionProvincia: dom.descripcionProvincia,
-                      codPostal: dom.codPostal,
-                    })) : undefined,
-                } : undefined,
-                datosRegimenGeneral: personaReturn.datosRegimenGeneral ? {
-                  impuestoIVA: personaReturn.datosRegimenGeneral.impuestoIVA ? 
-                    personaReturn.datosRegimenGeneral.impuestoIVA.map((imp: any) => ({
-                      idImpuesto: imp.idImpuesto,
-                      descripcionImpuesto: imp.descripcionImpuesto,
-                    })) : undefined,
-                } : undefined,
-              };
-              this.logger.log(JSON.stringify(safePersonaReturn, null, 2));
-            } catch (e) {
-              this.logger.log(`personaReturn (no serializable, extrayendo datos básicos): ${JSON.stringify({
-                hasDatosGenerales: !!personaReturn.datosGenerales,
-                hasDatosRegimenGeneral: !!personaReturn.datosRegimenGeneral,
-                errorConstancia: personaReturn.errorConstancia,
-              }, null, 2)}`);
-            }
-
-            // Verificar errores
+            // Verificar errores explícitos del padrón
             if (personaReturn.errorConstancia) {
               this.logger.error(`Error de AFIP: ${personaReturn.errorConstancia}`);
               reject(
@@ -1081,77 +1055,115 @@ export class AfipService implements OnModuleInit {
               return;
             }
 
-            // Verificar que haya datos
-            if (!personaReturn || !personaReturn.datosGenerales) {
+            // Validar que vino una persona en el response
+            if (!persona || (!persona.idPersona && !persona.tipoPersona)) {
               reject(
                 new BadRequestException(
-                  'No se encontraron datos del contribuyente',
+                  'No se encontraron datos del contribuyente en el padrón A13',
                 ),
               );
               return;
             }
 
-            // Mapear condición IVA desde datosRegimenGeneral
-            const datosGenerales = personaReturn.datosGenerales || {};
-            const datosRegimenGeneral = personaReturn.datosRegimenGeneral || {};
-            
-            const condicionIvaMap: { [key: number]: string } = {
-              1: 'No Responsable',
-              2: 'Exento',
-              3: 'No Gravado',
-              4: 'Responsable Inscripto',
-              5: 'Responsable No Inscripto (Consumidor Final)',
-              6: 'Monotributo',
-              7: 'Responsable Monotributo',
-              8: 'Proyecto',
-            };
+            // ── Tipo de persona ─────────────────────────────────────────────
+            const tipoPersona =
+              persona.tipoPersona === 'FISICA'
+                ? 'FISICA'
+                : persona.tipoPersona === 'JURIDICA'
+                ? 'JURIDICA'
+                : persona.tipoPersona || 'FISICA';
 
-            // Obtener condición IVA desde datosRegimenGeneral.impuestoIVA
-            let condicionIvaCodigo = 5; // Default: Consumidor Final
-            if (datosRegimenGeneral.impuestoIVA && datosRegimenGeneral.impuestoIVA.length > 0) {
-              // Tomar el primer impuesto IVA activo
-              const impuestoIVA = datosRegimenGeneral.impuestoIVA.find((imp: any) => imp.idImpuesto);
-              if (impuestoIVA && impuestoIVA.idImpuesto) {
-                condicionIvaCodigo = parseInt(impuestoIVA.idImpuesto);
-              }
-            }
-            const condicionIvaTexto = condicionIvaMap[condicionIvaCodigo] || 'Desconocida';
-
-            // Obtener tipo de persona
-            const tipoPersona = datosGenerales.tipoPersona === 'FISICA' ? 'FISICA' : 
-                               datosGenerales.tipoPersona === 'JURIDICA' ? 'JURIDICA' :
-                               datosGenerales.tipoPersona || 'FISICA';
-
-            // Denominación: para personas físicas usa nombre + apellido, para jurídicas usa razón social
+            // ── Denominación ────────────────────────────────────────────────
             let denominacion = 'Sin denominación';
             if (tipoPersona === 'FISICA') {
-              const nombre = datosGenerales.nombre || '';
-              const apellido = datosGenerales.apellido || '';
-              denominacion = `${nombre} ${apellido}`.trim() || 'Sin denominación';
+              const nombre = persona.nombre || '';
+              const apellido = persona.apellido || '';
+              denominacion = `${apellido} ${nombre}`.trim() || 'Sin denominación';
             } else {
-              denominacion = datosGenerales.razonSocial || 'Sin denominación';
+              denominacion = persona.razonSocial || 'Sin denominación';
             }
 
-            // Estado: según documentación viene en estadoClave
-            const estadoClave = datosGenerales.estadoClave || '';
-            const estado = estadoClave === 'ACTIVO' || estadoClave === 'Activo' ? 'ACTIVO' : 
-                          estadoClave === 'INACTIVO' || estadoClave === 'Inactivo' ? 'INACTIVO' :
-                          estadoClave || 'ACTIVO';
+            // ── Estado ──────────────────────────────────────────────────────
+            const estadoClave = persona.estadoClave || '';
+            const estado =
+              estadoClave === 'ACTIVO' || estadoClave === 'Activo'
+                ? 'ACTIVO'
+                : estadoClave === 'INACTIVO' || estadoClave === 'Inactivo'
+                ? 'INACTIVO'
+                : estadoClave || 'ACTIVO';
 
-            // Domicilio: devolver el objeto completo tal cual viene de AFIP
+            // ── Condición IVA ───────────────────────────────────────────────
+            // Padrón A13 devuelve `impuesto[]` con `idImpuesto` (catálogo AFIP):
+            //   30 = IVA (Responsable Inscripto)
+            //   32 = IVA Exento
+            //   20 = Monotributo
+            // estadoImpuesto: 'AC' = activo
+            //
+            // Y `categoria[]` cuando hay régimen Monotributo.
+            //
+            // Normalizamos a los códigos AFIP de facturación (condicionIvaReceptor)
+            // que es lo que consume el cliente: 1=RI, 4=Exento, 5=CF, 6=Monotributo.
+            const impuestos: any[] = Array.isArray(persona.impuesto)
+              ? persona.impuesto
+              : persona.impuesto
+              ? [persona.impuesto]
+              : [];
+            const categorias: any[] = Array.isArray(persona.categoria)
+              ? persona.categoria
+              : persona.categoria
+              ? [persona.categoria]
+              : [];
+
+            const isActivo = (item: any) => {
+              const estado = (item?.estadoImpuesto || item?.estado || 'AC').toString();
+              return estado === 'AC' || estado === 'ACTIVO' || estado === 'Activo';
+            };
+
+            const tieneImpuesto = (id: number) =>
+              impuestos.some((i) => Number(i?.idImpuesto) === id && isActivo(i));
+
+            const tieneMonotributoEnCategoria = categorias.some(
+              (c) =>
+                isActivo(c) &&
+                (Number(c?.idImpuesto) === 20 ||
+                  /monotrib/i.test(c?.descripcionCategoria || '')),
+            );
+
+            let condicionIvaCodigo: number;
+            let condicionIvaTexto: string;
+
+            if (tieneImpuesto(20) || tieneMonotributoEnCategoria) {
+              condicionIvaCodigo = 6;
+              condicionIvaTexto = 'Monotributista';
+            } else if (tieneImpuesto(32)) {
+              condicionIvaCodigo = 4;
+              condicionIvaTexto = 'IVA Exento';
+            } else if (tieneImpuesto(30)) {
+              condicionIvaCodigo = 1;
+              condicionIvaTexto = 'Responsable Inscripto';
+            } else {
+              condicionIvaCodigo = 5;
+              condicionIvaTexto = 'Consumidor Final';
+            }
+
+            // ── Domicilio ───────────────────────────────────────────────────
+            // A13 trae `domicilioFiscal` (objeto único) y/o `domicilio[]` (array).
+            // Preferimos `domicilioFiscal`; si no, el primer item de `domicilio[]`.
             let domicilio: any = undefined;
-            
-            // Primero intentar con domicilioFiscal (estructura más común en Constancia de Inscripción)
-            if (datosGenerales.domicilioFiscal) {
-              domicilio = datosGenerales.domicilioFiscal;
-            }
-            // Si no hay domicilioFiscal, intentar con array domicilio
-            else if (datosGenerales.domicilio && Array.isArray(datosGenerales.domicilio) && datosGenerales.domicilio.length > 0) {
-              domicilio = datosGenerales.domicilio[0]; // Tomar el primer domicilio
+            if (persona.domicilioFiscal) {
+              domicilio = persona.domicilioFiscal;
+            } else if (Array.isArray(persona.domicilio) && persona.domicilio.length > 0) {
+              domicilio =
+                persona.domicilio.find(
+                  (d: any) => (d?.tipoDomicilio || '').toString().toUpperCase().includes('FISCAL'),
+                ) || persona.domicilio[0];
+            } else if (persona.domicilio) {
+              domicilio = persona.domicilio;
             }
 
-            // Fecha de inscripción (si está disponible)
-            const fechaInscripcion = datosGenerales.fechaInscripcion || undefined;
+            // ── Fecha de inscripción ────────────────────────────────────────
+            const fechaInscripcion =
+              persona.fechaInscripcion || persona.fechaContratoSocial || undefined;
 
             const response: ContribuyenteResponseDto = {
               cuit: cuitAConsultar,
@@ -1164,7 +1176,7 @@ export class AfipService implements OnModuleInit {
               fechaInscripcion: fechaInscripcion,
             };
 
-            this.logger.log('=== DATOS CONTRIBUYENTE (Constancia de Inscripción) ===');
+            this.logger.log('=== DATOS CONTRIBUYENTE (Padrón A13) ===');
             this.logger.log(JSON.stringify(response, null, 2));
             this.logger.log('=== FIN CONSULTA CONTRIBUYENTE ===');
 
