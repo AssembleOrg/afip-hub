@@ -1,9 +1,11 @@
-import { Controller, Post, Get, Body, Query } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
+import { Controller, Post, Get, Body, Query, Res, Header, StreamableFile, BadRequestException } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiProduces } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { AfipService } from './afip.service';
+import { InvoicePdfService } from './invoice-pdf.service';
 import { AfipLoginDto, AfipTicketDto } from './dto';
-import { CreateInvoiceDto } from './dto/create-invoice.dto';
+import { CreateInvoiceDto, AlicuotaIva, Concepto } from './dto/create-invoice.dto';
+import { CreateCommerceInvoiceDto } from './dto/create-commerce-invoice.dto';
 import { InvoiceResponseDto, QrDataDto } from './dto/invoice-response.dto';
 import { UltimoAutorizadoDto, UltimoAutorizadoResponseDto } from './dto/ultimo-autorizado.dto';
 import { ConsultarContribuyenteDto, ContribuyenteResponseDto } from './dto/consultar-contribuyente.dto';
@@ -39,6 +41,8 @@ import {
   TipoOpcionalResponseDto,
   DummyResponseDto,
 } from './dto/wscdc.dto';
+import { GenerateInvoicePdfDto } from './dto/generate-invoice-pdf.dto';
+import { GenerateInvoicePdfBatchDto } from './dto/generate-invoice-pdf-batch.dto';
 import { ResponseDto } from '@/common/dto';
 import { Auditory, Public } from '@/common';
 
@@ -49,6 +53,7 @@ export class AfipController {
   constructor(
     private readonly afipService: AfipService,
     private readonly configService: ConfigService,
+    private readonly invoicePdfService: InvoicePdfService,
   ) {}
 
   @Get('status')
@@ -135,6 +140,31 @@ Crea un comprobante electrónico (factura, nota de crédito, nota de débito, et
     console.log('createInvoiceDto', createInvoiceDto);
     const invoice = await this.afipService.createInvoice(createInvoiceDto);
     return new ResponseDto(invoice, 'Factura creada exitosamente');
+  }
+
+  @Post('invoice/comercio')
+  @Auditory('Crear factura electrónica para comercio (múltiples ítems)')
+  @ApiOperation({
+    summary: 'Crear factura para comercio con múltiples ítems',
+    description: `
+Recibe \`items[]\` de productos/servicios, calcula automáticamente neto, IVA y total,
+y emite el comprobante en AFIP reutilizando el flujo estándar.
+
+Nota: AFIP WSFE no persiste el detalle de ítems; se autoriza por importes agregados.
+    `,
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Factura de comercio creada exitosamente',
+    type: ResponseDto<InvoiceResponseDto>,
+  })
+  @ApiResponse({ status: 400, description: 'Error en la solicitud' })
+  async createCommerceInvoice(
+    @Body() createCommerceInvoiceDto: CreateCommerceInvoiceDto,
+  ): Promise<ResponseDto<InvoiceResponseDto>> {
+    const invoiceRequest = this.mapCommerceInvoiceToStandard(createCommerceInvoiceDto);
+    const invoice = await this.afipService.createInvoice(invoiceRequest);
+    return new ResponseDto(invoice, 'Factura de comercio creada exitosamente');
   }
 
   @Post('ultimo-autorizado')
@@ -375,6 +405,90 @@ Este endpoint no requiere autenticación con AFIP, solo genera los datos del QR.
     };
 
     return new ResponseDto(qrData, 'Datos QR generados exitosamente');
+  }
+
+  @Post('invoice/pdf')
+  @Auditory('Generar factura en PDF')
+  @ApiOperation({
+    summary: 'Generar factura en formato PDF',
+    description: `
+Genera un PDF con formato estándar argentino a partir de los datos del comprobante y el CAE.
+
+El PDF incluye:
+- Encabezado con datos del emisor y letra del comprobante
+- Datos del receptor
+- Detalle de ítems
+- Totales discriminados (IVA para Factura A/M)
+- Código QR según RG 4291
+- CAE y fecha de vencimiento
+
+**No requiere autenticación con AFIP**, solo los datos del comprobante ya autorizado.
+    `,
+  })
+  @ApiProduces('application/pdf')
+  @ApiResponse({
+    status: 200,
+    description: 'PDF generado exitosamente',
+    content: {
+      'application/pdf': {
+        schema: { type: 'string', format: 'binary' },
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Error en los datos del comprobante' })
+  async generateInvoicePdf(
+    @Body() dto: GenerateInvoicePdfDto,
+    @Res({ passthrough: true }) res,
+  ): Promise<StreamableFile> {
+    const pdfBuffer = await this.invoicePdfService.generatePdf(dto);
+
+    const pvStr = String(dto.puntoVenta).padStart(5, '0');
+    const numStr = String(dto.numeroComprobante).padStart(8, '0');
+    const filename = `${dto.tipoComprobante.replace(/\s+/g, '_')}_${pvStr}-${numStr}.pdf`;
+
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    });
+
+    return new StreamableFile(pdfBuffer);
+  }
+
+  @Post('invoice/pdf/batch')
+  @Auditory('Generar lote de facturas en PDF')
+  @ApiOperation({
+    summary: 'Generar múltiples facturas en PDF (ZIP)',
+    description: `
+Genera un archivo ZIP con múltiples facturas en formato PDF.
+Ideal para generar todas las facturas de un período a partir de los datos del emisor y una lista de comprobantes con su CAE.
+
+Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punto de venta.
+    `,
+  })
+  @ApiProduces('application/zip')
+  @ApiResponse({
+    status: 200,
+    description: 'ZIP con PDFs generado exitosamente',
+    content: {
+      'application/zip': {
+        schema: { type: 'string', format: 'binary' },
+      },
+    },
+  })
+  async generateInvoicePdfBatch(
+    @Body() dto: GenerateInvoicePdfBatchDto,
+    @Res({ passthrough: true }) res,
+  ): Promise<StreamableFile> {
+    const zipBuffer = await this.invoicePdfService.generatePdfBatch(dto);
+
+    const filename = `facturas_${dto.emisor.cuit}_pv${dto.puntoVenta}.zip`;
+
+    res.set({
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    });
+
+    return new StreamableFile(zipBuffer);
   }
 
   // ============================================
@@ -643,5 +757,120 @@ Este endpoint no requiere autenticación con AFIP, solo genera los datos del QR.
     const result = await this.afipService.comprobanteDummy(useHomologacion);
 
     return new ResponseDto(result as DummyResponseDto, 'Estado de infraestructura obtenido exitosamente');
+  }
+
+  private mapCommerceInvoiceToStandard(dto: CreateCommerceInvoiceDto): CreateInvoiceDto {
+    if (!dto.items || dto.items.length === 0) {
+      throw new BadRequestException('Debe enviar al menos un ítem en items');
+    }
+
+    let importeNetoGravado = 0;
+    let importeNetoNoGravado = 0;
+    let importeExento = 0;
+    const ivaMap = new Map<number, { BaseImp: number; Importe: number }>();
+
+    for (const [index, item] of dto.items.entries()) {
+      const alicuota = item.alicuotaIva ?? AlicuotaIva.IVA_21;
+      const bonificacion = item.bonificacion ?? 0;
+      const base = this.roundCurrency(item.cantidad * item.precioUnitario);
+      const subtotal = this.roundCurrency(base - bonificacion);
+
+      if (subtotal < 0) {
+        throw new BadRequestException(
+          `El ítem #${index + 1} (${item.descripcion}) tiene subtotal negativo. Verifique cantidad, precio y bonificación.`,
+        );
+      }
+
+      if (alicuota === AlicuotaIva.NO_GRAVADO) {
+        importeNetoNoGravado += subtotal;
+        continue;
+      }
+
+      if (alicuota === AlicuotaIva.EXENTO) {
+        importeExento += subtotal;
+        continue;
+      }
+
+      const tasa = this.getAlicuotaPercent(alicuota);
+      const importeIvaLinea = this.roundCurrency((subtotal * tasa) / 100);
+      importeNetoGravado += subtotal;
+
+      const current = ivaMap.get(alicuota) || { BaseImp: 0, Importe: 0 };
+      current.BaseImp = this.roundCurrency(current.BaseImp + subtotal);
+      current.Importe = this.roundCurrency(current.Importe + importeIvaLinea);
+      ivaMap.set(alicuota, current);
+    }
+
+    importeNetoGravado = this.roundCurrency(importeNetoGravado);
+    importeNetoNoGravado = this.roundCurrency(importeNetoNoGravado);
+    importeExento = this.roundCurrency(importeExento);
+
+    const iva = Array.from(ivaMap.entries()).map(([Id, values]) => ({
+      Id,
+      BaseImp: values.BaseImp,
+      Importe: values.Importe,
+    }));
+
+    const importeIva = this.roundCurrency(
+      iva.reduce((acc, value) => acc + value.Importe, 0),
+    );
+    const importeTributos = this.roundCurrency(dto.importeTributos || 0);
+    const importeTotal = this.roundCurrency(
+      importeNetoGravado + importeNetoNoGravado + importeExento + importeIva + importeTributos,
+    );
+
+    return {
+      puntoVenta: dto.puntoVenta,
+      tipoComprobante: dto.tipoComprobante,
+      numeroComprobante: dto.numeroComprobante,
+      fechaComprobante: dto.fechaComprobante,
+      cuitCliente: dto.cuitCliente,
+      tipoDocumento: dto.tipoDocumento,
+      condicionIvaReceptor: dto.condicionIvaReceptor,
+      concepto: dto.concepto || Concepto.PRODUCTOS,
+      importeNetoGravado,
+      importeNetoNoGravado,
+      importeExento,
+      importeIva,
+      importeTributos,
+      importeTotal,
+      iva: iva.length > 0 ? iva : undefined,
+      comprobantesAsociados: dto.comprobantesAsociados,
+      monedaId: dto.monedaId,
+      cotizacionMoneda: dto.cotizacionMoneda,
+      fechaServicioDesde: dto.fechaServicioDesde,
+      fechaServicioHasta: dto.fechaServicioHasta,
+      fechaVencimientoPago: dto.fechaVencimientoPago,
+      cbu: dto.cbu,
+      fceVtoPago: dto.fceVtoPago,
+      cuitEmisor: dto.cuitEmisor,
+      certificado: dto.certificado,
+      clavePrivada: dto.clavePrivada,
+      homologacion: dto.homologacion,
+    };
+  }
+
+  private getAlicuotaPercent(alicuota: AlicuotaIva): number {
+    switch (alicuota) {
+      case AlicuotaIva.IVA_27:
+        return 27;
+      case AlicuotaIva.IVA_21:
+        return 21;
+      case AlicuotaIva.IVA_10_5:
+        return 10.5;
+      case AlicuotaIva.IVA_5:
+        return 5;
+      case AlicuotaIva.IVA_2_5:
+        return 2.5;
+      case AlicuotaIva.IVA_0:
+      case AlicuotaIva.NO_GRAVADO:
+      case AlicuotaIva.EXENTO:
+      default:
+        return 0;
+    }
+  }
+
+  private roundCurrency(value: number): number {
+    return Math.round((value + Number.EPSILON) * 100) / 100;
   }
 }

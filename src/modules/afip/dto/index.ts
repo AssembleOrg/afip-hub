@@ -1,12 +1,15 @@
 export * from './afip-login.dto';
 export * from './afip-ticket.dto';
 export * from './create-invoice.dto';
+export * from './create-commerce-invoice.dto';
 export * from './invoice-response.dto';
 export * from './ultimo-autorizado.dto';
 export * from './consultar-contribuyente.dto';
 export * from './afip-params.dto';
 export * from './ventanilla-electronica.dto';
 export * from './wscdc.dto';
+export * from './generate-invoice-pdf.dto';
+export * from './generate-invoice-pdf-batch.dto';
 
 // Explicit exports to help TypeScript
 export { 
