@@ -767,7 +767,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
     let importeNetoGravado = 0;
     let importeNetoNoGravado = 0;
     let importeExento = 0;
-    const ivaMap = new Map<number, { BaseImp: number; Importe: number }>();
+    const ivaMap = new Map<number, { BaseImp: number }>();
 
     for (const [index, item] of dto.items.entries()) {
       const alicuota = item.alicuotaIva ?? AlicuotaIva.IVA_21;
@@ -791,13 +791,14 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
         continue;
       }
 
-      const tasa = this.getAlicuotaPercent(alicuota);
-      const importeIvaLinea = this.roundCurrency((subtotal * tasa) / 100);
       importeNetoGravado += subtotal;
 
-      const current = ivaMap.get(alicuota) || { BaseImp: 0, Importe: 0 };
+      // Acumulamos solo la base por alícuota; el Importe se calcula sobre el
+      // total al final para evitar errores de redondeo por línea (AFIP valida
+      // Importe ≈ round(BaseImp × tasa / 100); si sumamos IVAs ya redondeados
+      // por línea, el total puede no coincidir y AFIP rechaza con código 10051).
+      const current = ivaMap.get(alicuota) || { BaseImp: 0 };
       current.BaseImp = this.roundCurrency(current.BaseImp + subtotal);
-      current.Importe = this.roundCurrency(current.Importe + importeIvaLinea);
       ivaMap.set(alicuota, current);
     }
 
@@ -805,11 +806,14 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
     importeNetoNoGravado = this.roundCurrency(importeNetoNoGravado);
     importeExento = this.roundCurrency(importeExento);
 
-    const iva = Array.from(ivaMap.entries()).map(([Id, values]) => ({
-      Id,
-      BaseImp: values.BaseImp,
-      Importe: values.Importe,
-    }));
+    const iva = Array.from(ivaMap.entries()).map(([Id, values]) => {
+      const tasa = this.getAlicuotaPercent(Id as AlicuotaIva);
+      return {
+        Id,
+        BaseImp: values.BaseImp,
+        Importe: this.roundCurrency((values.BaseImp * tasa) / 100),
+      };
+    });
 
     const importeIva = this.roundCurrency(
       iva.reduce((acc, value) => acc + value.Importe, 0),
