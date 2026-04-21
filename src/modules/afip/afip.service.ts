@@ -1,15 +1,24 @@
-import { Injectable, BadRequestException, Logger, OnModuleInit } from '@nestjs/common';
+/* eslint-disable @typescript-eslint/no-unsafe-call */
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment */
+import {
+  Injectable,
+  BadRequestException,
+  Logger,
+  OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as soap from 'soap';
-import * as fs from 'fs';
-import * as path from 'path';
-import { execSync } from 'child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { execSync } from 'node:child_process';
 import * as xml2js from 'xml2js';
-import * as crypto from 'crypto';
+import * as crypto from 'node:crypto';
+import { RedisService } from '@/infra/redis';
+import { resilientCall } from '@/infra/resilience';
 import { AfipTicketDto } from './dto';
-import { 
-  CreateInvoiceDto, 
-  TipoComprobante, 
+import {
+  CreateInvoiceDto,
   CondicionIvaReceptor,
   getClaseComprobante,
   esNotaCreditoDebito,
@@ -17,7 +26,11 @@ import {
   getCondicionesIvaValidas,
 } from './dto/create-invoice.dto';
 import { InvoiceResponseDto, QrDataDto } from './dto/invoice-response.dto';
-import { ConsultarContribuyenteDto, ContribuyenteResponseDto } from './dto/consultar-contribuyente.dto';
+import { NotaCreditoValidator } from './validators/nota-credito.validator';
+import {
+  ConsultarContribuyenteDto,
+  ContribuyenteResponseDto,
+} from './dto/consultar-contribuyente.dto';
 
 interface CachedTicket {
   ticket: AfipTicketDto;
@@ -41,13 +54,13 @@ interface PersistedTicketCache {
 export class AfipService implements OnModuleInit {
   private readonly logger = new Logger(AfipService.name);
   private wsaaUrl: string;
-  
+
   // Cache de tickets en memoria (clave: service + hash(certificado) + homologacion)
   private ticketCache: Map<string, CachedTicket> = new Map();
-  
+
   // Mapa de tickets en progreso para evitar race conditions
   private pendingTicketRequests: Map<string, PendingTicketRequest> = new Map();
-  
+
   // Persistencia en disco: ruta del archivo (null = no persistir)
   private ticketCacheFilePath: string | null = null;
   private persistWritePromise: Promise<void> = Promise.resolve();
@@ -57,22 +70,30 @@ export class AfipService implements OnModuleInit {
     production: {
       wsaa: 'https://wsaa.afip.gov.ar/ws/services/LoginCms?WSDL',
       wsfe: 'https://servicios1.afip.gov.ar/wsfev1/service.asmx?WSDL',
-      padron: 'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA13?WSDL',
-      ventanilla: 'https://infraestructura.afip.gob.ar/ve-ws/services/veconsumer?wsdl',
+      padron:
+        'https://aws.afip.gov.ar/sr-padron/webservices/personaServiceA13?WSDL',
+      ventanilla:
+        'https://infraestructura.afip.gob.ar/ve-ws/services/veconsumer?wsdl',
       wscdc: 'https://servicios1.arca.gov.ar/WSCDC/service.asmx?WSDL',
     },
     homologacion: {
       wsaa: 'https://wsaahomo.afip.gov.ar/ws/services/LoginCms?WSDL',
       wsfe: 'https://wswhomo.afip.gov.ar/wsfev1/service.asmx?WSDL',
-      padron: 'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA13?WSDL',
-      ventanilla: 'https://stable-middleware-tecno-ext.afip.gob.ar/ve-ws/services/veconsumer?wsdl',
+      padron:
+        'https://awshomo.afip.gov.ar/sr-padron/webservices/personaServiceA13?WSDL',
+      ventanilla:
+        'https://stable-middleware-tecno-ext.afip.gob.ar/ve-ws/services/veconsumer?wsdl',
       wscdc: 'https://wswhomo.arca.gov.ar/WSCDC/service.asmx?WSDL',
     },
   };
 
-  constructor(private configService: ConfigService) {
+  constructor(
+    private configService: ConfigService,
+    private readonly redis: RedisService,
+  ) {
     this.wsaaUrl = this.configService.get<string>('afip.wsaaUrl') || '';
-    const configuredPath = this.configService.get<string>('afip.ticketCachePath') || '';
+    const configuredPath =
+      this.configService.get<string>('afip.ticketCachePath') || '';
     this.ticketCacheFilePath = configuredPath.trim()
       ? configuredPath.trim()
       : path.join(process.cwd(), '.afip-ticket-cache.json');
@@ -105,25 +126,25 @@ export class AfipService implements OnModuleInit {
 
   /**
    * Genera un Ticket de Acceso (TA) para autenticarse con los servicios de AFIP
-   * 
+   *
    * @param service - Nombre del servicio de AFIP (ej: 'wsfe', 'wsfex', 'wsbfe')
    * @param certificado - Certificado en formato PEM (texto completo o base64)
    * @param clavePrivada - Clave privada en formato PEM (texto completo o base64)
    * @returns Promise<AfipTicketDto> - Ticket con token, sign y fechas de validez
-   * 
+   *
    * @example
    * // Obtener ticket para Facturación Electrónica
    * const ticket = await afipService.getTicket('wsfe', certificado, clavePrivada);
    * console.log('Token:', ticket.token);
    * console.log('Válido hasta:', ticket.expirationTime);
-   * 
+   *
    * @description
    * Este método realiza el siguiente flujo:
    * 1. Crea un TRA (Ticket de Requerimiento de Acceso) en formato XML
    * 2. Firma el TRA con el certificado digital de AFIP
    * 3. Envía el TRA firmado al WSAA (Web Service de Autenticación y Autorización)
    * 4. Recibe y parsea el TA (Ticket de Acceso) que es válido por 12 horas
-   * 
+   *
    * El ticket obtenido se usa luego para autenticarse en otros servicios de AFIP
    * incluyendo el token y sign en los headers SOAP de cada llamada.
    */
@@ -134,20 +155,26 @@ export class AfipService implements OnModuleInit {
     homologacion: boolean = false,
   ): Promise<AfipTicketDto> {
     // Generar clave única para el cache: service + hash(certificado) + entorno
-    const certHash = crypto.createHash('sha256').update(certificado).digest('hex').substring(0, 16);
+    const certHash = crypto
+      .createHash('sha256')
+      .update(certificado)
+      .digest('hex')
+      .substring(0, 16);
     const cacheKey = `${service}_${certHash}_${homologacion ? 'homo' : 'prod'}`;
 
-    // 1. Verificar si hay un ticket válido en cache
+    // 1. Verificar si hay un ticket válido en cache (memoria)
     const cached = this.ticketCache.get(cacheKey);
     if (cached) {
       const now = new Date();
       // Verificar si el ticket sigue siendo válido (con margen de 5 minutos)
       const margin = 5 * 60 * 1000; // 5 minutos en milisegundos
       const expiresAtWithMargin = new Date(cached.expiresAt.getTime() - margin);
-      
+
       if (now < expiresAtWithMargin) {
-        this.logger.log(`=== TICKET DESDE CACHE ===`);
-        this.logger.log(`Servicio: ${service}, Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
+        this.logger.log(`=== TICKET DESDE CACHE (memoria) ===`);
+        this.logger.log(
+          `Servicio: ${service}, Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`,
+        );
         this.logger.log(`Válido hasta: ${cached.expiresAt.toISOString()}`);
         return cached.ticket;
       } else {
@@ -157,26 +184,47 @@ export class AfipService implements OnModuleInit {
       }
     }
 
+    // 1.b Intentar Redis distribuido — compartido entre instancias.
+    const fromRedis = await this.readTicketFromRedis(cacheKey);
+    if (fromRedis) {
+      this.ticketCache.set(cacheKey, fromRedis);
+      this.logger.log(`=== TICKET DESDE CACHE (redis) ===`);
+      this.logger.log(`Válido hasta: ${fromRedis.expiresAt.toISOString()}`);
+      return fromRedis.ticket;
+    }
+
     // 2. Verificar si ya hay una request en progreso para este cacheKey
     const pendingRequest = this.pendingTicketRequests.get(cacheKey);
     if (pendingRequest) {
       this.logger.log(`=== ESPERANDO TICKET EN PROGRESO ===`);
-      this.logger.log(`Servicio: ${service}, hay una solicitud en curso, esperando resultado...`);
+      this.logger.log(
+        `Servicio: ${service}, hay una solicitud en curso, esperando resultado...`,
+      );
       try {
         // Esperar al resultado de la request existente
         const ticket = await pendingRequest.promise;
-        this.logger.log(`Ticket recibido de request en progreso para ${service}`);
+        this.logger.log(
+          `Ticket recibido de request en progreso para ${service}`,
+        );
         return ticket;
       } catch (error) {
         // Si la request en progreso falló, intentaremos obtener uno nuevo
-        this.logger.warn(`Request en progreso falló, intentando nueva solicitud...`);
+        this.logger.warn(
+          `Request en progreso falló, intentando nueva solicitud...`,
+        );
         // La request pendiente ya se eliminó en el finally del obtainTicketFromWSAA
       }
     }
 
     // 3. No hay ticket en cache ni request en progreso, crear nueva solicitud
-    const ticketPromise = this.obtainTicketFromWSAA(service, certificado, clavePrivada, homologacion, cacheKey);
-    
+    const ticketPromise = this.obtainTicketFromWSAA(
+      service,
+      certificado,
+      clavePrivada,
+      homologacion,
+      cacheKey,
+    );
+
     // Registrar esta request como pendiente
     this.pendingTicketRequests.set(cacheKey, {
       promise: ticketPromise,
@@ -206,7 +254,9 @@ export class AfipService implements OnModuleInit {
     try {
       this.logger.log(`=== INICIO OBTENCIÓN DE TICKET ===`);
       this.logger.log(`Servicio solicitado: ${service}`);
-      this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
+      this.logger.log(
+        `Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`,
+      );
 
       // Paso 1: Crear el TRA (Ticket de Requerimiento de Acceso)
       const tra = this.createTRA(service);
@@ -216,26 +266,31 @@ export class AfipService implements OnModuleInit {
       // Paso 2: Firmar el TRA con el certificado digital
       this.logger.log('Firmando TRA con certificado...');
       const signedTra = this.signTRA(tra, certificado, clavePrivada);
-      this.logger.log(`CMS generado (primeros 100 caracteres): ${signedTra.substring(0, 100)}...`);
+      this.logger.log(
+        `CMS generado (primeros 100 caracteres): ${signedTra.substring(0, 100)}...`,
+      );
 
       // Paso 3: Llamar al servicio WSAA para obtener el TA
       this.logger.log('Llamando a WSAA...');
       const urls = this.getAfipUrls(homologacion);
       const ticket = await this.callWSAA(signedTra, urls.wsaa);
 
-      // Guardar en cache (memoria + disco). AFIP devuelve ISO o formato compacto
+      // Guardar en cache (memoria + disco + Redis). AFIP devuelve ISO o formato compacto
       const expirationDate = this.parseAfipDate(ticket.expirationTime);
       this.ticketCache.set(cacheKey, {
         ticket,
         expiresAt: expirationDate,
       });
       this.persistTicketCache();
+      void this.writeTicketToRedis(cacheKey, ticket, expirationDate);
 
       // Limpiar tickets expirados del cache
       this.cleanExpiredTickets();
 
       this.logger.log(`=== TICKET OBTENIDO ===`);
-      this.logger.log(`Token (primeros 50 caracteres): ${ticket.token.substring(0, 50)}...`);
+      this.logger.log(
+        `Token (primeros 50 caracteres): ${ticket.token.substring(0, 50)}...`,
+      );
       this.logger.log(`Válido desde: ${ticket.generationTime}`);
       this.logger.log(`Válido hasta: ${ticket.expirationTime}`);
       this.logger.log('=== FIN OBTENCIÓN DE TICKET ===');
@@ -243,54 +298,66 @@ export class AfipService implements OnModuleInit {
       return ticket;
     } catch (error: any) {
       // Si el error es "alreadyAuthenticated", AFIP ya tiene un TA válido pero nosotros no lo tenemos
-      if (error.message?.includes('alreadyAuthenticated') || error.message?.includes('ya posee un TA valido')) {
-        this.logger.warn('AFIP reporta ticket ya autenticado; intentando recuperar desde caché persistido...');
-        
+      if (
+        error.message?.includes('alreadyAuthenticated') ||
+        error.message?.includes('ya posee un TA valido')
+      ) {
+        this.logger.warn(
+          'AFIP reporta ticket ya autenticado; intentando recuperar desde caché persistido...',
+        );
+
         // Primero cargar desde disco (por si reiniciamos y teníamos el ticket guardado)
         await this.loadTicketCacheFromFile();
         let cached = this.ticketCache.get(cacheKey);
         if (cached) {
           const now = new Date();
           const margin = 5 * 60 * 1000;
-          const expiresAtWithMargin = new Date(cached.expiresAt.getTime() - margin);
+          const expiresAtWithMargin = new Date(
+            cached.expiresAt.getTime() - margin,
+          );
           if (now < expiresAtWithMargin) {
             this.logger.log('Usando ticket recuperado del caché persistido');
             return cached.ticket;
           }
         }
-        
+
         // Esperar antes de reintentar (AFIP puede tardar en liberar)
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+
         cached = this.ticketCache.get(cacheKey);
         if (cached) {
           const now = new Date();
           const margin = 5 * 60 * 1000;
-          const expiresAtWithMargin = new Date(cached.expiresAt.getTime() - margin);
-          
+          const expiresAtWithMargin = new Date(
+            cached.expiresAt.getTime() - margin,
+          );
+
           if (now < expiresAtWithMargin) {
-            this.logger.log('Usando ticket del cache después de error alreadyAuthenticated');
+            this.logger.log(
+              'Usando ticket del cache después de error alreadyAuthenticated',
+            );
             return cached.ticket;
           }
         }
-        
+
         // Reintentar una vez más después de esperar
         this.logger.log('Reintentando obtención de ticket...');
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+
         try {
           const tra = this.createTRA(service);
           const signedTra = this.signTRA(tra, certificado, clavePrivada);
           const urls = this.getAfipUrls(homologacion);
           const ticket = await this.callWSAA(signedTra, urls.wsaa);
-          
-          // Guardar en cache (memoria + disco)
+
+          // Guardar en cache (memoria + disco + Redis)
           const expirationDate = this.parseAfipDate(ticket.expirationTime);
           this.ticketCache.set(cacheKey, {
             ticket,
             expiresAt: expirationDate,
           });
           this.persistTicketCache();
+          void this.writeTicketToRedis(cacheKey, ticket, expirationDate);
 
           this.logger.log('Ticket obtenido en reintento');
           return ticket;
@@ -301,22 +368,26 @@ export class AfipService implements OnModuleInit {
           if (cachedRetry) {
             const now = new Date();
             const margin = 5 * 60 * 1000;
-            const expiresAtWithMargin = new Date(cachedRetry.expiresAt.getTime() - margin);
-            
+            const expiresAtWithMargin = new Date(
+              cachedRetry.expiresAt.getTime() - margin,
+            );
+
             if (now < expiresAtWithMargin) {
-              this.logger.log('Usando ticket del cache después de segundo reintento fallido');
+              this.logger.log(
+                'Usando ticket del cache después de segundo reintento fallido',
+              );
               return cachedRetry.ticket;
             }
           }
-          
+
           throw new BadRequestException(
             'AFIP indica que ya existe un ticket válido pero no se pudo recuperar. ' +
-            'Esto puede ocurrir si hay múltiples requests simultáneas. ' +
-            'Por favor, espera unos segundos e intenta nuevamente.',
+              'Esto puede ocurrir si hay múltiples requests simultáneas. ' +
+              'Por favor, espera unos segundos e intenta nuevamente.',
           );
         }
       }
-      
+
       this.logger.error(`Error al obtener ticket: ${error.message}`);
       this.logger.error(`Stack: ${error.stack}`);
       throw new BadRequestException(
@@ -338,19 +409,68 @@ export class AfipService implements OnModuleInit {
       }
     }
 
-    keysToDelete.forEach(key => this.ticketCache.delete(key));
+    keysToDelete.forEach((key) => this.ticketCache.delete(key));
 
     // Si el cache tiene más de 100 entradas, limpiar las más antiguas
     if (this.ticketCache.size > 100) {
       const entries = Array.from(this.ticketCache.entries());
-      entries.sort((a, b) => a[1].expiresAt.getTime() - b[1].expiresAt.getTime());
-      
+      entries.sort(
+        (a, b) => a[1].expiresAt.getTime() - b[1].expiresAt.getTime(),
+      );
+
       for (let i = 0; i < 50 && i < entries.length; i++) {
         this.ticketCache.delete(entries[i][0]);
       }
     }
 
     this.persistTicketCache();
+  }
+
+  /**
+   * Lee ticket cacheado desde Redis. Sirve para compartir tickets entre
+   * múltiples instancias de la app: si el replica A consigue el TA, el
+   * replica B lo reutiliza sin pegar a WSAA.
+   *
+   * Si Redis no está disponible, devuelve null sin loguear ruido.
+   */
+  private async readTicketFromRedis(
+    cacheKey: string,
+  ): Promise<CachedTicket | null> {
+    const res = await this.redis.safeCall((r) =>
+      r.get(`afip:ticket:${cacheKey}`),
+    );
+    if (!res.ok || !res.value) return null;
+    try {
+      const parsed = JSON.parse(res.value);
+      const expiresAt = new Date(parsed.expiresAt);
+      const margin = 5 * 60 * 1000;
+      if (Date.now() >= expiresAt.getTime() - margin) return null;
+      return { ticket: parsed.ticket, expiresAt };
+    } catch {
+      return null;
+    }
+  }
+
+  private async writeTicketToRedis(
+    cacheKey: string,
+    ticket: AfipTicketDto,
+    expiresAt: Date,
+  ): Promise<void> {
+    if (!(expiresAt instanceof Date) || !Number.isFinite(expiresAt.getTime())) {
+      return;
+    }
+    const ttlSec = Math.max(
+      60,
+      Math.floor((expiresAt.getTime() - Date.now()) / 1000) - 300, // margen 5 min
+    );
+    await this.redis.safeCall((r) =>
+      r.set(
+        `afip:ticket:${cacheKey}`,
+        JSON.stringify({ ticket, expiresAt: expiresAt.toISOString() }),
+        'EX',
+        ttlSec,
+      ),
+    );
   }
 
   /**
@@ -373,7 +493,9 @@ export class AfipService implements OnModuleInit {
         }
       }
       if (loaded > 0) {
-        this.logger.log(`Caché de tickets AFIP: cargados ${loaded} ticket(s) desde ${this.ticketCacheFilePath}`);
+        this.logger.log(
+          `Caché de tickets AFIP: cargados ${loaded} ticket(s) desde ${this.ticketCacheFilePath}`,
+        );
       }
     } catch (err: any) {
       if (err.code !== 'ENOENT') {
@@ -391,9 +513,10 @@ export class AfipService implements OnModuleInit {
     for (const [key, cached] of this.ticketCache.entries()) {
       const expiresAt = cached.expiresAt;
       // Evitar Invalid time value si la fecha no se parseó bien
-      const expiresAtStr = expiresAt instanceof Date && Number.isFinite(expiresAt.getTime())
-        ? expiresAt.toISOString()
-        : new Date(Date.now() + 11 * 60 * 60 * 1000).toISOString(); // fallback: +11h
+      const expiresAtStr =
+        expiresAt instanceof Date && Number.isFinite(expiresAt.getTime())
+          ? expiresAt.toISOString()
+          : new Date(Date.now() + 11 * 60 * 60 * 1000).toISOString(); // fallback: +11h
       obj[key] = {
         ticket: cached.ticket,
         expiresAt: expiresAtStr,
@@ -401,15 +524,19 @@ export class AfipService implements OnModuleInit {
     }
     const payload = JSON.stringify(obj, null, 0);
     this.persistWritePromise = this.persistWritePromise
-      .then(() => fs.promises.writeFile(this.ticketCacheFilePath!, payload, 'utf8'))
-      .catch((err) => this.logger.warn(`No se pudo guardar caché de tickets: ${err.message}`));
+      .then(() =>
+        fs.promises.writeFile(this.ticketCacheFilePath!, payload, 'utf8'),
+      )
+      .catch((err) =>
+        this.logger.warn(`No se pudo guardar caché de tickets: ${err.message}`),
+      );
   }
 
   /**
    * Crea el XML del TRA (Ticket de Requerimiento de Acceso)
    * IMPORTANTE: NO incluir la declaración <?xml ...?> ya que AFIP no la acepta
    * Estructura según especificación oficial de AFIP
-   * 
+   *
    * AFIP recomienda una ventana de 10 minutos para generationTime y expirationTime
    */
   private createTRA(service: string): string {
@@ -437,13 +564,17 @@ export class AfipService implements OnModuleInit {
   /**
    * Firma el TRA con el certificado usando OpenSSL y genera el CMS (PKCS#7) en base64
    * El CMS se genera en formato DER y se codifica en base64 para enviarlo a AFIP
-   * 
+   *
    * @param tra - XML del TRA a firmar
    * @param certificado - Certificado en formato PEM (texto completo o base64)
    * @param clavePrivada - Clave privada en formato PEM (texto completo o base64)
    * @returns CMS firmado en base64
    */
-  private signTRA(tra: string, certificado: string, clavePrivada: string): string {
+  private signTRA(
+    tra: string,
+    certificado: string,
+    clavePrivada: string,
+  ): string {
     if (!certificado || !clavePrivada) {
       throw new BadRequestException(
         'Certificado y clave privada son requeridos',
@@ -460,7 +591,7 @@ export class AfipService implements OnModuleInit {
     const traPath = path.join(tmpDir, `TRA-${timestamp}.xml`);
     const certPath = path.join(tmpDir, `cert-${timestamp}.crt`);
     const keyPath = path.join(tmpDir, `key-${timestamp}.key`);
-    
+
     try {
       // Decodificar certificado si viene en base64
       let certContent = certificado;
@@ -485,12 +616,22 @@ export class AfipService implements OnModuleInit {
       }
 
       // Validar que el contenido tenga los headers correctos
-      if (!certContent.includes('-----BEGIN') || !certContent.includes('-----END')) {
-        throw new BadRequestException('El certificado debe estar en formato PEM con headers -----BEGIN/END-----');
+      if (
+        !certContent.includes('-----BEGIN') ||
+        !certContent.includes('-----END')
+      ) {
+        throw new BadRequestException(
+          'El certificado debe estar en formato PEM con headers -----BEGIN/END-----',
+        );
       }
 
-      if (!keyContent.includes('-----BEGIN') || !keyContent.includes('-----END')) {
-        throw new BadRequestException('La clave privada debe estar en formato PEM con headers -----BEGIN/END-----');
+      if (
+        !keyContent.includes('-----BEGIN') ||
+        !keyContent.includes('-----END')
+      ) {
+        throw new BadRequestException(
+          'La clave privada debe estar en formato PEM con headers -----BEGIN/END-----',
+        );
       }
 
       // Escribir archivos temporales
@@ -514,7 +655,10 @@ export class AfipService implements OnModuleInit {
       try {
         cmsBuffer = execSync(cmd, { encoding: 'buffer' });
       } catch (execError: any) {
-        const errorOutput = execError.stderr?.toString() || execError.stdout?.toString() || execError.message;
+        const errorOutput =
+          execError.stderr?.toString() ||
+          execError.stdout?.toString() ||
+          execError.message;
         throw new Error(`OpenSSL error: ${errorOutput}`);
       }
 
@@ -523,9 +667,7 @@ export class AfipService implements OnModuleInit {
 
       return cmsBase64;
     } catch (error: any) {
-      throw new BadRequestException(
-        `Error al firmar el TRA: ${error.message}`,
-      );
+      throw new BadRequestException(`Error al firmar el TRA: ${error.message}`);
     } finally {
       // Limpiar archivos temporales
       try {
@@ -534,15 +676,48 @@ export class AfipService implements OnModuleInit {
         if (fs.existsSync(keyPath)) fs.unlinkSync(keyPath);
       } catch (cleanupError) {
         // Ignorar errores de limpieza
-        this.logger.warn(`Error al limpiar archivos temporales: ${cleanupError}`);
+        this.logger.warn(
+          `Error al limpiar archivos temporales: ${cleanupError}`,
+        );
       }
     }
   }
 
   /**
-   * Llama al servicio WSAA para obtener el Ticket de Acceso
+   * Llama al servicio WSAA para obtener el Ticket de Acceso. Envuelto en
+   * `resilientCall` con retries (3, exp backoff) y circuit breaker por
+   * entorno. El error "alreadyAuthenticated" no es retryable (lo maneja la
+   * lógica de arriba que recupera el ticket del caché).
    */
-  private async callWSAA(signedTra: string, wsaaUrl?: string): Promise<AfipTicketDto> {
+  private async callWSAA(
+    signedTra: string,
+    wsaaUrl?: string,
+  ): Promise<AfipTicketDto> {
+    const isHomo = (wsaaUrl ?? '').includes('homo');
+    return resilientCall(() => this._callWSAARaw(signedTra, wsaaUrl), {
+      name: `afip-wsaa-${isHomo ? 'homo' : 'prod'}`,
+      maxAttempts: 3,
+      baseBackoffMs: 1000,
+      perAttemptTimeoutMs: 30000,
+      shouldRetry: (err) => {
+        const msg = String((err as any)?.message ?? err).toLowerCase();
+        // No reintentamos errores de negocio que no van a cambiar al reintentar
+        if (
+          msg.includes('alreadyauthenticated') ||
+          msg.includes('ya posee un ta')
+        )
+          return false;
+        if (msg.includes('certificado') || msg.includes('clave privada'))
+          return false;
+        return true;
+      },
+    });
+  }
+
+  private async _callWSAARaw(
+    signedTra: string,
+    wsaaUrl?: string,
+  ): Promise<AfipTicketDto> {
     return new Promise((resolve, reject) => {
       // Usar la URL proporcionada o la del config, asegurando que termine con ?WSDL
       const url = wsaaUrl || this.wsaaUrl;
@@ -562,48 +737,65 @@ export class AfipService implements OnModuleInit {
         // NO usar escapeXML: false - el CMS ya viene en base64, debe escaparse si es necesario
       };
 
-      soap.createClient(
-        finalUrl,
-        soapOptions,
-        (err, client) => {
-          if (err) {
-            this.logger.error(`Error al crear cliente SOAP: ${err.message}`);
-            reject(new Error(`Error al crear cliente SOAP: ${err.message}. URL: ${finalUrl}`));
-            return;
-          }
-
-          if (!client || !client.loginCms) {
-            this.logger.error(`El cliente SOAP no tiene el método loginCms`);
-            reject(new Error(`El cliente SOAP no tiene el método loginCms. Verifica la URL: ${wsaaUrl}`));
-            return;
-          }
-
-          this.logger.log('Cliente SOAP creado correctamente, llamando loginCms...');
-
-          client.loginCms(
-            { in0: signedTra },
-            async (err: any, result: any) => {
-              if (err) {
-                this.logger.error(`Error al llamar WSAA: ${err.message || JSON.stringify(err)}`);
-                reject(new Error(`Error al llamar WSAA: ${err.message || JSON.stringify(err)}`));
-                return;
-              }
-
-              try {
-                this.logger.log('Respuesta recibida de WSAA, parseando...');
-                // Parsear el XML de respuesta para extraer el ticket
-                const ticket = await this.parseTicketResponse(result.loginCmsReturn);
-                this.logger.log('Ticket parseado correctamente');
-                resolve(ticket);
-              } catch (parseError: any) {
-                this.logger.error(`Error al parsear respuesta: ${parseError.message}`);
-                this.logger.error(`Respuesta recibida: ${JSON.stringify(result, null, 2)}`);
-                reject(new Error(`Error al parsear respuesta: ${parseError.message}`));
-              }
-            },
+      soap.createClient(finalUrl, soapOptions, (err, client) => {
+        if (err) {
+          this.logger.error(`Error al crear cliente SOAP: ${err.message}`);
+          reject(
+            new Error(
+              `Error al crear cliente SOAP: ${err.message}. URL: ${finalUrl}`,
+            ),
           );
-        },
-      );
+          return;
+        }
+
+        if (!client || !client.loginCms) {
+          this.logger.error(`El cliente SOAP no tiene el método loginCms`);
+          reject(
+            new Error(
+              `El cliente SOAP no tiene el método loginCms. Verifica la URL: ${wsaaUrl}`,
+            ),
+          );
+          return;
+        }
+
+        this.logger.log(
+          'Cliente SOAP creado correctamente, llamando loginCms...',
+        );
+
+        client.loginCms({ in0: signedTra }, async (err: any, result: any) => {
+          if (err) {
+            this.logger.error(
+              `Error al llamar WSAA: ${err.message || JSON.stringify(err)}`,
+            );
+            reject(
+              new Error(
+                `Error al llamar WSAA: ${err.message || JSON.stringify(err)}`,
+              ),
+            );
+            return;
+          }
+
+          try {
+            this.logger.log('Respuesta recibida de WSAA, parseando...');
+            // Parsear el XML de respuesta para extraer el ticket
+            const ticket = await this.parseTicketResponse(
+              result.loginCmsReturn,
+            );
+            this.logger.log('Ticket parseado correctamente');
+            resolve(ticket);
+          } catch (parseError: any) {
+            this.logger.error(
+              `Error al parsear respuesta: ${parseError.message}`,
+            );
+            this.logger.error(
+              `Respuesta recibida: ${JSON.stringify(result, null, 2)}`,
+            );
+            reject(
+              new Error(`Error al parsear respuesta: ${parseError.message}`),
+            );
+          }
+        });
+      });
     });
   }
 
@@ -618,10 +810,21 @@ export class AfipService implements OnModuleInit {
     let d = new Date(trimmed);
     if (Number.isFinite(d.getTime())) return d;
     // Formato compacto: 20260203172557 o 20260203T172557
-    const match = trimmed.match(/^(\d{4})(\d{2})(\d{2})[T\s]?(\d{2})?(\d{2})?(\d{2})?/);
+    const match = trimmed.match(
+      /^(\d{4})(\d{2})(\d{2})[T\s]?(\d{2})?(\d{2})?(\d{2})?/,
+    );
     if (match) {
       const [, y, mo, day, h = '00', mi = '00', s = '00'] = match;
-      d = new Date(Date.UTC(parseInt(y!, 10), parseInt(mo!, 10) - 1, parseInt(day!, 10), parseInt(h, 10), parseInt(mi, 10), parseInt(s, 10)));
+      d = new Date(
+        Date.UTC(
+          parseInt(y!, 10),
+          parseInt(mo!, 10) - 1,
+          parseInt(day!, 10),
+          parseInt(h, 10),
+          parseInt(mi, 10),
+          parseInt(s, 10),
+        ),
+      );
       if (Number.isFinite(d.getTime())) return d;
     }
     return new Date(Date.now() + 11 * 60 * 60 * 1000);
@@ -630,7 +833,9 @@ export class AfipService implements OnModuleInit {
   /**
    * Parsea la respuesta XML del WSAA para extraer el ticket
    */
-  private async parseTicketResponse(xmlResponse: string): Promise<AfipTicketDto> {
+  private async parseTicketResponse(
+    xmlResponse: string,
+  ): Promise<AfipTicketDto> {
     return new Promise((resolve, reject) => {
       const parser = new xml2js.Parser({ explicitArray: false });
       parser.parseString(xmlResponse, (err, result) => {
@@ -647,7 +852,11 @@ export class AfipService implements OnModuleInit {
 
           // xml2js puede devolver valores como string o como objeto { _: "valor" }
           const str = (v: any): string =>
-            typeof v === 'string' ? v : (v && (v._ ?? v['#text'] ?? v)) ? String(v._ ?? v['#text'] ?? v) : '';
+            typeof v === 'string'
+              ? v
+              : v && (v._ ?? v['#text'] ?? v)
+                ? String(v._ ?? v['#text'] ?? v)
+                : '';
 
           const ticket: AfipTicketDto = {
             token: str(credentials.token),
@@ -672,9 +881,9 @@ export class AfipService implements OnModuleInit {
     // Convertir a hora de Buenos Aires (GMT-3)
     const buenosAiresOffset = -3 * 60; // -3 horas en minutos
     const localTime = date.getTime();
-    const utcTime = localTime + (date.getTimezoneOffset() * 60000);
-    const buenosAiresTime = new Date(utcTime + (buenosAiresOffset * 60000));
-    
+    const utcTime = localTime + date.getTimezoneOffset() * 60000;
+    const buenosAiresTime = new Date(utcTime + buenosAiresOffset * 60000);
+
     // Formatear como YYYY-MM-DDTHH:mm:ss-03:00
     const year = buenosAiresTime.getFullYear();
     const month = String(buenosAiresTime.getMonth() + 1).padStart(2, '0');
@@ -682,7 +891,7 @@ export class AfipService implements OnModuleInit {
     const hours = String(buenosAiresTime.getHours()).padStart(2, '0');
     const minutes = String(buenosAiresTime.getMinutes()).padStart(2, '0');
     const seconds = String(buenosAiresTime.getSeconds()).padStart(2, '0');
-    
+
     return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}-03:00`;
   }
 
@@ -696,12 +905,12 @@ export class AfipService implements OnModuleInit {
 
   /**
    * Obtiene el último comprobante autorizado para un punto de venta y tipo de comprobante
-   * 
+   *
    * @param puntoVenta - Punto de venta
    * @param tipoComprobante - Tipo de comprobante
    * @param ticket - Ticket de acceso de AFIP
    * @returns Promise con el último número y fecha autorizados
-   * 
+   *
    * @example
    * const ultimo = await this.getUltimoAutorizado(1, 6, ticket);
    * console.log('Último número:', ultimo.CbteNro);
@@ -763,13 +972,17 @@ export class AfipService implements OnModuleInit {
           if (err) {
             // Si el error es "Not Found" o similar, significa que no hay comprobantes previos
             // Esto es normal en la primera factura de un punto de venta/tipo
-            const errorMessage = (err.message || err.toString() || '').toLowerCase();
+            const errorMessage = (
+              err.message ||
+              err.toString() ||
+              ''
+            ).toLowerCase();
             const errorString = JSON.stringify(err).toLowerCase();
             const errorBody = (err.body || '').toLowerCase();
             const errorRoot = (err.root || '').toLowerCase();
-            
+
             // Verificar múltiples formas en que puede venir el error "Not Found"
-            const isNotFound = 
+            const isNotFound =
               errorMessage.includes('not found') ||
               errorMessage.includes('no encontrado') ||
               errorMessage.includes('404') ||
@@ -780,27 +993,31 @@ export class AfipService implements OnModuleInit {
               errorBody.includes('no encontrado') ||
               errorRoot.includes('not found') ||
               errorRoot.includes('no encontrado') ||
-              (err.statusCode === 404) ||
-              (err.status === 404);
-            
+              err.statusCode === 404 ||
+              err.status === 404;
+
             if (isNotFound) {
-              this.logger.log('No se encontraron comprobantes previos (primera factura). Usando valores por defecto.');
-              
+              this.logger.log(
+                'No se encontraron comprobantes previos (primera factura). Usando valores por defecto.',
+              );
+
               // Generar fecha actual en formato YYYYMMDD
               const now = new Date();
               const year = now.getFullYear();
               const month = String(now.getMonth() + 1).padStart(2, '0');
               const day = String(now.getDate()).padStart(2, '0');
               const fechaActual = `${year}${month}${day}`;
-              
+
               resolve({ CbteNro: 0, CbteFch: fechaActual });
               return;
             }
-            
+
             this.logger.error(
               `Error al llamar FECompUltimoAutorizado: ${err.message}`,
             );
-            this.logger.error(`Error completo: ${JSON.stringify(err, null, 2)}`);
+            this.logger.error(
+              `Error completo: ${JSON.stringify(err, null, 2)}`,
+            );
             reject(
               new BadRequestException(
                 `Error en FECompUltimoAutorizado: ${err.message}`,
@@ -817,33 +1034,44 @@ export class AfipService implements OnModuleInit {
           // Verificar errores
           if (data.Errors && data.Errors.length > 0) {
             // Si el error es que no se encontró el comprobante, es la primera factura
-            const hasNotFoundError = data.Errors.some((error: any) => 
-              error.Code === 10015 || // Código específico de AFIP para "no encontrado"
-              error.Msg?.toLowerCase().includes('no encontrado') ||
-              error.Msg?.toLowerCase().includes('not found') ||
-              error.Msg?.toLowerCase().includes('sin comprobantes')
+            const hasNotFoundError = data.Errors.some(
+              (error: any) =>
+                error.Code === 10015 || // Código específico de AFIP para "no encontrado"
+                error.Msg?.toLowerCase().includes('no encontrado') ||
+                error.Msg?.toLowerCase().includes('not found') ||
+                error.Msg?.toLowerCase().includes('sin comprobantes'),
             );
 
             if (hasNotFoundError) {
-              this.logger.log('No se encontraron comprobantes previos (primera factura). Usando valores por defecto.');
-              
+              this.logger.log(
+                'No se encontraron comprobantes previos (primera factura). Usando valores por defecto.',
+              );
+
               // Generar fecha actual en formato YYYYMMDD
               const now = new Date();
               const year = now.getFullYear();
               const month = String(now.getMonth() + 1).padStart(2, '0');
               const day = String(now.getDate()).padStart(2, '0');
               const fechaActual = `${year}${month}${day}`;
-              
+
               resolve({ CbteNro: 0, CbteFch: fechaActual });
               return;
             }
 
             this.logger.error('=== ERRORES EN FECompUltimoAutorizado ===');
             data.Errors.forEach((error: any, index: number) => {
-              this.logger.error(`Error ${index + 1}: Code=${error.Code}, Msg=${error.Msg}`);
+              this.logger.error(
+                `Error ${index + 1}: Code=${error.Code}, Msg=${error.Msg}`,
+              );
             });
-            const errorMsg = data.Errors.map((e: any) => `${e.Code}: ${e.Msg}`).join(', ');
-            reject(new BadRequestException(`Error de AFIP en FECompUltimoAutorizado: ${errorMsg}`));
+            const errorMsg = data.Errors.map(
+              (e: any) => `${e.Code}: ${e.Msg}`,
+            ).join(', ');
+            reject(
+              new BadRequestException(
+                `Error de AFIP en FECompUltimoAutorizado: ${errorMsg}`,
+              ),
+            );
             return;
           }
 
@@ -858,10 +1086,14 @@ export class AfipService implements OnModuleInit {
             const month = String(now.getMonth() + 1).padStart(2, '0');
             const day = String(now.getDate()).padStart(2, '0');
             ultimoFch = `${year}${month}${day}`;
-            this.logger.log('No se encontró fecha del último comprobante. Usando fecha actual.');
+            this.logger.log(
+              'No se encontró fecha del último comprobante. Usando fecha actual.',
+            );
           }
 
-          this.logger.log(`Último comprobante autorizado -> Nro: ${ultimoNro}, Fecha: ${ultimoFch}`);
+          this.logger.log(
+            `Último comprobante autorizado -> Nro: ${ultimoNro}, Fecha: ${ultimoFch}`,
+          );
 
           resolve({ CbteNro: ultimoNro, CbteFch: ultimoFch });
         });
@@ -871,10 +1103,10 @@ export class AfipService implements OnModuleInit {
 
   /**
    * Consulta datos de un contribuyente en AFIP usando el servicio Padrón A5
-   * 
+   *
    * @param consultaDto - DTO con CUIT a consultar, certificado, clave y CUIT emisor
    * @returns Promise<ContribuyenteResponseDto> - Datos del contribuyente consultado
-   * 
+   *
    * @example
    * const datos = await this.consultarContribuyente({
    *   cuit: '20386949604',
@@ -906,7 +1138,10 @@ export class AfipService implements OnModuleInit {
       }
 
       const cuitEmisor = cuitEmisorRaw.replace(/-/g, ''); // Remover guiones
-      const homologacion = consultaDto.homologacion !== undefined ? consultaDto.homologacion : false;
+      const homologacion =
+        consultaDto.homologacion !== undefined
+          ? consultaDto.homologacion
+          : false;
 
       // Obtener ticket del servicio Padrón A13 (ws_sr_padron_a13)
       // A13 es el servicio de padrón más actual que devuelve los datos completos
@@ -918,7 +1153,9 @@ export class AfipService implements OnModuleInit {
         clavePrivada,
         homologacion,
       );
-      this.logger.log(`Ticket obtenido, válido hasta: ${ticket.expirationTime}`);
+      this.logger.log(
+        `Ticket obtenido, válido hasta: ${ticket.expirationTime}`,
+      );
 
       // URL del servicio Padrón A13 (personaServiceA13)
       const urls = this.getAfipUrls(homologacion);
@@ -929,7 +1166,9 @@ export class AfipService implements OnModuleInit {
       return new Promise((resolve, reject) => {
         soap.createClient(padronUrl, (err: any, client: any) => {
           if (err) {
-            this.logger.error(`Error al crear cliente SOAP Padrón: ${err.message}`);
+            this.logger.error(
+              `Error al crear cliente SOAP Padrón: ${err.message}`,
+            );
             reject(
               new BadRequestException(
                 `Error al crear cliente SOAP Padrón: ${err.message}`,
@@ -939,8 +1178,14 @@ export class AfipService implements OnModuleInit {
           }
 
           // Log métodos disponibles para debugging
-          this.logger.log('Métodos disponibles en el cliente Constancia de Inscripción:');
-          this.logger.log(Object.keys(client).filter(key => typeof client[key] === 'function').join(', '));
+          this.logger.log(
+            'Métodos disponibles en el cliente Constancia de Inscripción:',
+          );
+          this.logger.log(
+            Object.keys(client)
+              .filter((key) => typeof client[key] === 'function')
+              .join(', '),
+          );
 
           // Estructura del request según documentación oficial Constancia de Inscripción v3.4
           // https://www.afip.gob.ar/ws/WSCI/manual-ws-sr-ws-constancia-inscripcion-v3.4.pdf
@@ -948,7 +1193,7 @@ export class AfipService implements OnModuleInit {
           // NO dentro de un objeto auth (a diferencia de otros servicios como WSFE o WSCDC)
           const cuitEmisorClean = cuitEmisor.replace(/-/g, '');
           const cuitAConsultarClean = cuitAConsultar.replace(/-/g, '');
-          
+
           const req = {
             token: ticket.token,
             sign: ticket.sign,
@@ -956,21 +1201,37 @@ export class AfipService implements OnModuleInit {
             idPersona: cuitAConsultarClean,
           };
 
-          this.logger.log('=== REQUEST getPersona_v2 (Constancia de Inscripción) ===');
+          this.logger.log(
+            '=== REQUEST getPersona_v2 (Constancia de Inscripción) ===',
+          );
           this.logger.log(`CUIT Emisor (limpio): ${cuitEmisorClean}`);
           this.logger.log(`CUIT a Consultar (limpio): ${cuitAConsultarClean}`);
-          this.logger.log(`Token (primeros 50 chars): ${ticket.token.substring(0, 50)}...`);
-          this.logger.log(`Sign (primeros 50 chars): ${ticket.sign.substring(0, 50)}...`);
+          this.logger.log(
+            `Token (primeros 50 chars): ${ticket.token.substring(0, 50)}...`,
+          );
+          this.logger.log(
+            `Sign (primeros 50 chars): ${ticket.sign.substring(0, 50)}...`,
+          );
           this.logger.log('Request completo: ' + JSON.stringify(req, null, 2));
 
           // Método según documentación v3.4: getPersona_v2 (versión más reciente)
           // También existe getPersona pero se recomienda usar _v2
-          const methodName = client.getPersona_v2 ? 'getPersona_v2' : 
-                            client.getPersona ? 'getPersona' : null;
+          const methodName = client.getPersona_v2
+            ? 'getPersona_v2'
+            : client.getPersona
+              ? 'getPersona'
+              : null;
 
           if (!methodName) {
-            this.logger.error('No se encontró método válido en el servicio de Constancia de Inscripción');
-            this.logger.error('Métodos disponibles:', Object.keys(client).filter(k => typeof client[k] === 'function'));
+            this.logger.error(
+              'No se encontró método válido en el servicio de Constancia de Inscripción',
+            );
+            this.logger.error(
+              'Métodos disponibles:',
+              Object.keys(client).filter(
+                (k) => typeof client[k] === 'function',
+              ),
+            );
             reject(
               new BadRequestException(
                 'No se encontró método getPersona_v2 o getPersona en el servicio de Constancia de Inscripción de AFIP',
@@ -982,28 +1243,46 @@ export class AfipService implements OnModuleInit {
           this.logger.log(`Usando método: ${methodName}`);
 
           client[methodName](req, (err: any, result: any) => {
-            this.logger.log(`=== RESPONSE ${methodName} (Constancia de Inscripción) ===`);
-            
+            this.logger.log(
+              `=== RESPONSE ${methodName} (Constancia de Inscripción) ===`,
+            );
+
             if (err) {
-              this.logger.error(`Error al consultar contribuyente: ${err.message}`);
+              this.logger.error(
+                `Error al consultar contribuyente: ${err.message}`,
+              );
               // Intentar loguear el error de forma segura
               try {
-                this.logger.error('Error completo: ' + JSON.stringify(err, null, 2));
+                this.logger.error(
+                  'Error completo: ' + JSON.stringify(err, null, 2),
+                );
               } catch (e) {
                 this.logger.error(`Error (no serializable): ${err.toString()}`);
               }
-              
+
               // Si el error es de autenticación, puede ser problema con el ID del servicio o el formato del request
               if (err.message && err.message.includes('firma valida')) {
-                this.logger.error('⚠️ ERROR DE AUTENTICACIÓN: El ticket puede no ser válido para este servicio');
+                this.logger.error(
+                  '⚠️ ERROR DE AUTENTICACIÓN: El ticket puede no ser válido para este servicio',
+                );
                 this.logger.error('Posibles causas:');
-                this.logger.error('1. El ID del servicio usado para obtener el ticket no es correcto');
-                this.logger.error('2. El formato del request no es el esperado por el servicio');
-                this.logger.error('3. El certificado/clave privada no están registrados para este servicio');
-                this.logger.error(`ID del servicio usado: ws_sr_constancia_inscripcion`);
-                this.logger.error('Verifica en el manual v3.4 si el ID del servicio es correcto');
+                this.logger.error(
+                  '1. El ID del servicio usado para obtener el ticket no es correcto',
+                );
+                this.logger.error(
+                  '2. El formato del request no es el esperado por el servicio',
+                );
+                this.logger.error(
+                  '3. El certificado/clave privada no están registrados para este servicio',
+                );
+                this.logger.error(
+                  `ID del servicio usado: ws_sr_constancia_inscripcion`,
+                );
+                this.logger.error(
+                  'Verifica en el manual v3.4 si el ID del servicio es correcto',
+                );
               }
-              
+
               reject(
                 new BadRequestException(
                   `Error al consultar contribuyente: ${err.message}. Si el error es de autenticación, verifica que el certificado esté registrado para el servicio de Constancia de Inscripción y que el ID del servicio sea correcto.`,
@@ -1017,7 +1296,10 @@ export class AfipService implements OnModuleInit {
             // Algunos clientes SOAP exponen `persona` directo en el root del result.
             const personaReturn = result?.personaReturn || result || {};
             const persona =
-              personaReturn.persona || personaReturn.Persona || personaReturn || {};
+              personaReturn.persona ||
+              personaReturn.Persona ||
+              personaReturn ||
+              {};
 
             try {
               this.logger.log('=== personaReturn (Padrón A13) ===');
@@ -1046,7 +1328,9 @@ export class AfipService implements OnModuleInit {
 
             // Verificar errores explícitos del padrón
             if (personaReturn.errorConstancia) {
-              this.logger.error(`Error de AFIP: ${personaReturn.errorConstancia}`);
+              this.logger.error(
+                `Error de AFIP: ${personaReturn.errorConstancia}`,
+              );
               reject(
                 new BadRequestException(
                   `Error al consultar contribuyente: ${personaReturn.errorConstancia}`,
@@ -1070,15 +1354,16 @@ export class AfipService implements OnModuleInit {
               persona.tipoPersona === 'FISICA'
                 ? 'FISICA'
                 : persona.tipoPersona === 'JURIDICA'
-                ? 'JURIDICA'
-                : persona.tipoPersona || 'FISICA';
+                  ? 'JURIDICA'
+                  : persona.tipoPersona || 'FISICA';
 
             // ── Denominación ────────────────────────────────────────────────
             let denominacion = 'Sin denominación';
             if (tipoPersona === 'FISICA') {
               const nombre = persona.nombre || '';
               const apellido = persona.apellido || '';
-              denominacion = `${apellido} ${nombre}`.trim() || 'Sin denominación';
+              denominacion =
+                `${apellido} ${nombre}`.trim() || 'Sin denominación';
             } else {
               denominacion = persona.razonSocial || 'Sin denominación';
             }
@@ -1089,8 +1374,8 @@ export class AfipService implements OnModuleInit {
               estadoClave === 'ACTIVO' || estadoClave === 'Activo'
                 ? 'ACTIVO'
                 : estadoClave === 'INACTIVO' || estadoClave === 'Inactivo'
-                ? 'INACTIVO'
-                : estadoClave || 'ACTIVO';
+                  ? 'INACTIVO'
+                  : estadoClave || 'ACTIVO';
 
             // ── Condición IVA ───────────────────────────────────────────────
             // Padrón A13 devuelve `impuesto[]` con `idImpuesto` (catálogo AFIP):
@@ -1106,21 +1391,29 @@ export class AfipService implements OnModuleInit {
             const impuestos: any[] = Array.isArray(persona.impuesto)
               ? persona.impuesto
               : persona.impuesto
-              ? [persona.impuesto]
-              : [];
+                ? [persona.impuesto]
+                : [];
             const categorias: any[] = Array.isArray(persona.categoria)
               ? persona.categoria
               : persona.categoria
-              ? [persona.categoria]
-              : [];
+                ? [persona.categoria]
+                : [];
 
             const isActivo = (item: any) => {
-              const estado = (item?.estadoImpuesto || item?.estado || 'AC').toString();
-              return estado === 'AC' || estado === 'ACTIVO' || estado === 'Activo';
+              const estado = (
+                item?.estadoImpuesto ||
+                item?.estado ||
+                'AC'
+              ).toString();
+              return (
+                estado === 'AC' || estado === 'ACTIVO' || estado === 'Activo'
+              );
             };
 
             const tieneImpuesto = (id: number) =>
-              impuestos.some((i) => Number(i?.idImpuesto) === id && isActivo(i));
+              impuestos.some(
+                (i) => Number(i?.idImpuesto) === id && isActivo(i),
+              );
 
             const tieneMonotributoEnCategoria = categorias.some(
               (c) =>
@@ -1152,10 +1445,16 @@ export class AfipService implements OnModuleInit {
             let domicilio: any = undefined;
             if (persona.domicilioFiscal) {
               domicilio = persona.domicilioFiscal;
-            } else if (Array.isArray(persona.domicilio) && persona.domicilio.length > 0) {
+            } else if (
+              Array.isArray(persona.domicilio) &&
+              persona.domicilio.length > 0
+            ) {
               domicilio =
-                persona.domicilio.find(
-                  (d: any) => (d?.tipoDomicilio || '').toString().toUpperCase().includes('FISCAL'),
+                persona.domicilio.find((d: any) =>
+                  (d?.tipoDomicilio || '')
+                    .toString()
+                    .toUpperCase()
+                    .includes('FISCAL'),
                 ) || persona.domicilio[0];
             } else if (persona.domicilio) {
               domicilio = persona.domicilio;
@@ -1163,7 +1462,9 @@ export class AfipService implements OnModuleInit {
 
             // ── Fecha de inscripción ────────────────────────────────────────
             const fechaInscripcion =
-              persona.fechaInscripcion || persona.fechaContratoSocial || undefined;
+              persona.fechaInscripcion ||
+              persona.fechaContratoSocial ||
+              undefined;
 
             const response: ContribuyenteResponseDto = {
               cuit: cuitAConsultar,
@@ -1185,7 +1486,9 @@ export class AfipService implements OnModuleInit {
         });
       });
     } catch (error: any) {
-      this.logger.error(`Error general al consultar contribuyente: ${error.message}`);
+      this.logger.error(
+        `Error general al consultar contribuyente: ${error.message}`,
+      );
       this.logger.error(`Stack: ${error.stack}`);
       throw new BadRequestException(
         `Error al consultar contribuyente: ${error.message}`,
@@ -1195,15 +1498,15 @@ export class AfipService implements OnModuleInit {
 
   /**
    * Crea una factura electrónica usando el servicio WSFE de AFIP
-   * 
+   *
    * @param invoiceData - Datos de la factura a crear
    * @param ticket - Ticket de acceso de AFIP (si no se proporciona, se obtiene uno nuevo)
    * @returns Promise<InvoiceResponseDto> - Respuesta con CAE y datos de la factura autorizada
-   * 
+   *
    * @example
    * // Obtener ticket primero
    * const ticket = await this.getTicket('wsfe');
-   * 
+   *
    * // Crear factura
    * const factura = await this.createInvoice({
    *   puntoVenta: 1,
@@ -1224,7 +1527,9 @@ export class AfipService implements OnModuleInit {
   ): Promise<InvoiceResponseDto> {
     try {
       this.logger.log('=== INICIO CREACIÓN DE FACTURA ===');
-      this.logger.log(`Datos recibidos: ${JSON.stringify(invoiceData, null, 2)}`);
+      this.logger.log(
+        `Datos recibidos: ${JSON.stringify(invoiceData, null, 2)}`,
+      );
 
       // Validar que se proporcionen certificado, clave y CUIT
       const certificado = (invoiceData as any).certificado;
@@ -1238,23 +1543,34 @@ export class AfipService implements OnModuleInit {
       }
 
       const cuitEmisor = cuitEmisorRaw.replace(/-/g, ''); // Remover guiones si los tiene
-      const homologacion = invoiceData.homologacion !== undefined ? invoiceData.homologacion : false;
+      const homologacion =
+        invoiceData.homologacion !== undefined
+          ? invoiceData.homologacion
+          : false;
       this.logger.log(`CUIT Emisor: ${cuitEmisor}`);
-      this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
+      this.logger.log(
+        `Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`,
+      );
 
       // Si no se proporciona ticket, obtener uno nuevo usando los certificados del request
       let authTicket = ticket;
       if (!authTicket || !this.validateTicket(authTicket)) {
-        this.logger.log('Ticket no válido o no proporcionado, obteniendo nuevo ticket...');
+        this.logger.log(
+          'Ticket no válido o no proporcionado, obteniendo nuevo ticket...',
+        );
         authTicket = await this.getTicket(
           'wsfe',
           certificado,
           clavePrivada,
           homologacion,
         );
-        this.logger.log(`Ticket obtenido, válido hasta: ${authTicket.expirationTime}`);
+        this.logger.log(
+          `Ticket obtenido, válido hasta: ${authTicket.expirationTime}`,
+        );
       } else {
-        this.logger.log(`Usando ticket existente, válido hasta: ${authTicket.expirationTime}`);
+        this.logger.log(
+          `Usando ticket existente, válido hasta: ${authTicket.expirationTime}`,
+        );
       }
 
       // URL del servicio WSFE (Facturación Electrónica)
@@ -1266,7 +1582,7 @@ export class AfipService implements OnModuleInit {
       // Obtener el último comprobante autorizado para calcular el próximo número
       this.logger.log('Obteniendo último comprobante autorizado...');
       let ultimo: { CbteNro: number; CbteFch: string };
-      
+
       try {
         ultimo = await this.getUltimoAutorizado(
           invoiceData.puntoVenta,
@@ -1280,8 +1596,13 @@ export class AfipService implements OnModuleInit {
         this.logger.error(JSON.stringify(error, null, 2));
         // Si el error es "Not Found", es la primera factura - usar valores por defecto
         const errorMessage = (error.message || '').toLowerCase();
-        if (errorMessage.includes('not found') || errorMessage.includes('no encontrado')) {
-          this.logger.log('No se encontraron comprobantes previos (primera factura). Usando valores por defecto.');
+        if (
+          errorMessage.includes('not found') ||
+          errorMessage.includes('no encontrado')
+        ) {
+          this.logger.log(
+            'No se encontraron comprobantes previos (primera factura). Usando valores por defecto.',
+          );
           const now = new Date();
           const year = now.getFullYear();
           const month = String(now.getMonth() + 1).padStart(2, '0');
@@ -1289,7 +1610,10 @@ export class AfipService implements OnModuleInit {
           const fechaActual = `${year}${month}${day}`;
           ultimo = { CbteNro: 0, CbteFch: fechaActual };
         } else {
-          this.logger.error('Error al obtener último comprobante autorizado: ' + JSON.stringify(error, null, 2));
+          this.logger.error(
+            'Error al obtener último comprobante autorizado: ' +
+              JSON.stringify(error, null, 2),
+          );
           // Re-lanzar otros errores
           throw error;
         }
@@ -1322,7 +1646,7 @@ export class AfipService implements OnModuleInit {
       if (ultimaFecha && fechaCbte < ultimaFecha) {
         throw new BadRequestException(
           `La fecha del comprobante (${fechaCbte}) no puede ser anterior a la del último comprobante autorizado (${ultimaFecha}). ` +
-          `AFIP solo permite fechas iguales o posteriores al último comprobante emitido para este punto de venta y tipo de comprobante.`,
+            `AFIP solo permite fechas iguales o posteriores al último comprobante emitido para este punto de venta y tipo de comprobante.`,
         );
       }
 
@@ -1339,14 +1663,17 @@ export class AfipService implements OnModuleInit {
         docNro = 0;
       } else {
         // Otros tipos: parsear el CUIT/DNI del cliente
-        docNro = invoiceData.cuitCliente === '0' ? 0 : parseInt(invoiceData.cuitCliente.replace(/-/g, ''));
+        docNro =
+          invoiceData.cuitCliente === '0'
+            ? 0
+            : parseInt(invoiceData.cuitCliente.replace(/-/g, ''));
         if (isNaN(docNro) || docNro <= 0) {
           throw new BadRequestException(
-            `DocNro inválido para DocTipo ${invoiceData.tipoDocumento}. Debe ser un número válido > 0`
+            `DocNro inválido para DocTipo ${invoiceData.tipoDocumento}. Debe ser un número válido > 0`,
           );
         }
       }
-      
+
       // MonId debe ser string: 'PES' (Pesos), 'DOL' (Dólares), etc.
       const monId = invoiceData.monedaId || 'PES';
       const monCotiz = invoiceData.cotizacionMoneda || 1;
@@ -1359,7 +1686,7 @@ export class AfipService implements OnModuleInit {
       // Condición frente al IVA del receptor
       // Según Manual ARCA-COMPG v4.0 - Obligatorio desde 01/02/2026
       let condicionIva = invoiceData.condicionIvaReceptor;
-      
+
       // Asignar valor por defecto según clase de comprobante
       if (!condicionIva) {
         switch (claseComprobante) {
@@ -1368,34 +1695,49 @@ export class AfipService implements OnModuleInit {
           case 'FCE_A':
             // Clase A/M: receptor debe ser Responsable Inscripto o Monotributista
             condicionIva = CondicionIvaReceptor.IVA_RESPONSABLE_INSCRIPTO;
-            this.logger.log(`Comprobante clase ${claseComprobante}: usando condición IVA por defecto = 1 (Responsable Inscripto)`);
+            this.logger.log(
+              `Comprobante clase ${claseComprobante}: usando condición IVA por defecto = 1 (Responsable Inscripto)`,
+            );
             break;
           case 'B':
           case 'FCE_B':
             // Clase B: receptor puede ser Consumidor Final, Exento, etc.
             condicionIva = CondicionIvaReceptor.CONSUMIDOR_FINAL;
-            this.logger.log(`Comprobante clase ${claseComprobante}: usando condición IVA por defecto = 5 (Consumidor Final)`);
+            this.logger.log(
+              `Comprobante clase ${claseComprobante}: usando condición IVA por defecto = 5 (Consumidor Final)`,
+            );
             break;
           case 'C':
           case 'FCE_C':
             // Clase C (Monotributo): receptor puede ser cualquiera
             condicionIva = CondicionIvaReceptor.CONSUMIDOR_FINAL;
-            this.logger.log(`Comprobante clase ${claseComprobante}: usando condición IVA por defecto = 5 (Consumidor Final)`);
+            this.logger.log(
+              `Comprobante clase ${claseComprobante}: usando condición IVA por defecto = 5 (Consumidor Final)`,
+            );
             break;
         }
       } else {
         // Validar que la condición IVA sea válida para la clase de comprobante
         const condicionesValidas = getCondicionesIvaValidas(claseComprobante);
-        if (condicionesValidas.length > 0 && !condicionesValidas.includes(condicionIva)) {
-          this.logger.warn(`Condición IVA ${condicionIva} no es válida para clase ${claseComprobante}. Valores válidos: ${condicionesValidas.join(', ')}`);
+        if (
+          condicionesValidas.length > 0 &&
+          !condicionesValidas.includes(condicionIva)
+        ) {
+          this.logger.warn(
+            `Condición IVA ${condicionIva} no es válida para clase ${claseComprobante}. Valores válidos: ${condicionesValidas.join(', ')}`,
+          );
         }
       }
 
-      this.logger.log(`DocTipo: ${invoiceData.tipoDocumento}, DocNro: ${docNro}`);
+      this.logger.log(
+        `DocTipo: ${invoiceData.tipoDocumento}, DocNro: ${docNro}`,
+      );
       this.logger.log(`MonId: ${monId}, MonCotiz: ${monCotiz}`);
-      this.logger.log(`Concepto: ${invoiceData.concepto} (1=Productos, 2=Servicios, 3=Productos+Servicios)`);
+      this.logger.log(
+        `Concepto: ${invoiceData.concepto} (1=Productos, 2=Servicios, 3=Productos+Servicios)`,
+      );
       this.logger.log(`Condición IVA Receptor: ${condicionIva}`);
-      
+
       // Construir el detalle de la factura
       const detalle: any = {
         Concepto: invoiceData.concepto,
@@ -1417,7 +1759,9 @@ export class AfipService implements OnModuleInit {
       // Incluir descuento/bonificación si se proporciona
       if (invoiceData.importeDescuento && invoiceData.importeDescuento > 0) {
         detalle.ImpBonif = invoiceData.importeDescuento;
-        this.logger.log(`Descuento/Bonificación aplicado: ${invoiceData.importeDescuento}`);
+        this.logger.log(
+          `Descuento/Bonificación aplicado: ${invoiceData.importeDescuento}`,
+        );
       }
 
       // Incluir condición IVA del receptor (obligatorio desde 01/02/2026)
@@ -1429,30 +1773,49 @@ export class AfipService implements OnModuleInit {
       // Según Manual ARCA-COMPG v4.0: debe enviarse el desglose de alícuotas
       if (invoiceData.iva && invoiceData.iva.length > 0) {
         detalle.Iva = {
-          AlicIva: invoiceData.iva.map(iva => ({
+          AlicIva: invoiceData.iva.map((iva) => ({
             Id: iva.Id,
             BaseImp: iva.BaseImp,
             Importe: iva.Importe,
           })),
         };
-        this.logger.log(`Array de IVA incluido con ${invoiceData.iva.length} alícuota(s)`);
-      } else if (invoiceData.importeIva > 0 && (claseComprobante === 'A' || claseComprobante === 'B' || claseComprobante === 'M')) {
+        this.logger.log(
+          `Array de IVA incluido con ${invoiceData.iva.length} alícuota(s)`,
+        );
+      } else if (
+        invoiceData.importeIva > 0 &&
+        (claseComprobante === 'A' ||
+          claseComprobante === 'B' ||
+          claseComprobante === 'M')
+      ) {
         // Si hay IVA pero no se envió el array, crear uno con IVA 21%
         detalle.Iva = {
-          AlicIva: [{
-            Id: 5, // 21%
-            BaseImp: invoiceData.importeNetoGravado,
-            Importe: invoiceData.importeIva,
-          }],
+          AlicIva: [
+            {
+              Id: 5, // 21%
+              BaseImp: invoiceData.importeNetoGravado,
+              Importe: invoiceData.importeIva,
+            },
+          ],
         };
-        this.logger.log('Array de IVA generado automáticamente con alícuota 21%');
+        this.logger.log(
+          'Array de IVA generado automáticamente con alícuota 21%',
+        );
+      }
+
+      // Validación de reglas de NC/ND (N-5, clase match, FCE rules, etc.)
+      if (esNotaCreditoDebito(tipoComprobanteValue)) {
+        NotaCreditoValidator.validate(invoiceData);
       }
 
       // Comprobantes asociados - Requerido para Notas de Crédito/Débito
       if (esNotaCreditoDebito(tipoComprobanteValue)) {
-        if (invoiceData.comprobantesAsociados && invoiceData.comprobantesAsociados.length > 0) {
+        if (
+          invoiceData.comprobantesAsociados &&
+          invoiceData.comprobantesAsociados.length > 0
+        ) {
           detalle.CbtesAsoc = {
-            CbteAsoc: invoiceData.comprobantesAsociados.map(cbte => {
+            CbteAsoc: invoiceData.comprobantesAsociados.map((cbte) => {
               const asoc: any = {
                 Tipo: cbte.Tipo,
                 PtoVta: cbte.PtoVta,
@@ -1465,22 +1828,53 @@ export class AfipService implements OnModuleInit {
               return asoc;
             }),
           };
-          this.logger.log(`Comprobantes asociados incluidos: ${invoiceData.comprobantesAsociados.length}`);
-        } else {
-          this.logger.warn('Nota de Crédito/Débito sin comprobantes asociados - AFIP puede rechazarla');
+          this.logger.log(
+            `Comprobantes asociados incluidos: ${invoiceData.comprobantesAsociados.length}`,
+          );
+        }
+
+        // Período asociado (alternativa a CbteAsoc para NC/ND que ajustan un rango)
+        if (invoiceData.periodoAsociado) {
+          detalle.PeriodoAsoc = {
+            FchDesde: invoiceData.periodoAsociado.FchDesde,
+            FchHasta: invoiceData.periodoAsociado.FchHasta,
+          };
+          this.logger.log(
+            `Período asociado: ${invoiceData.periodoAsociado.FchDesde} - ${invoiceData.periodoAsociado.FchHasta}`,
+          );
+        }
+      }
+
+      // Opcionales genéricos (el user puede mandar cualquier opcional)
+      // + auto-inyección del opcional 22 según esAnulacion
+      const opcionalesAcum: Array<{ Id: number; Valor: string }> = [];
+      if (invoiceData.opcionales && invoiceData.opcionales.length > 0) {
+        for (const o of invoiceData.opcionales) {
+          opcionalesAcum.push({ Id: o.Id, Valor: o.Valor });
+        }
+      }
+      if (
+        esNotaCreditoDebito(tipoComprobanteValue) &&
+        invoiceData.esAnulacion !== undefined
+      ) {
+        const yaTiene22 = opcionalesAcum.some((o) => o.Id === 22);
+        if (!yaTiene22) {
+          opcionalesAcum.push({
+            Id: 22,
+            Valor: invoiceData.esAnulacion ? 'S' : 'N',
+          });
+          this.logger.log(
+            `Opcional 22 auto-inyectado: Valor=${invoiceData.esAnulacion ? 'S' : 'N'}`,
+          );
         }
       }
 
       // Campos para Facturas de Crédito Electrónica (MiPyME)
       if (esFacturaCreditoElectronica(tipoComprobanteValue)) {
         if (invoiceData.cbu) {
-          detalle.Opcionales = {
-            Opcional: [
-              { Id: 2101, Valor: invoiceData.cbu.Cbu }, // CBU
-            ],
-          };
+          opcionalesAcum.push({ Id: 2101, Valor: invoiceData.cbu.Cbu });
           if (invoiceData.cbu.Alias) {
-            detalle.Opcionales.Opcional.push({ Id: 2102, Valor: invoiceData.cbu.Alias });
+            opcionalesAcum.push({ Id: 2102, Valor: invoiceData.cbu.Alias });
           }
           this.logger.log('Datos de CBU incluidos para FCE');
         }
@@ -1490,6 +1884,11 @@ export class AfipService implements OnModuleInit {
         }
       }
 
+      // Set Opcionales final al detalle si hay alguno
+      if (opcionalesAcum.length > 0) {
+        detalle.Opcionales = { Opcional: opcionalesAcum };
+      }
+
       // Fechas de servicio - Solo para Concepto 2 (Servicios) o 3 (Productos + Servicios)
       if (invoiceData.concepto === 2 || invoiceData.concepto === 3) {
         detalle.FchServDesde = invoiceData.fechaServicioDesde || fechaCbte;
@@ -1497,9 +1896,11 @@ export class AfipService implements OnModuleInit {
         detalle.FchVtoPago = invoiceData.fechaVencimientoPago || fechaCbte;
         this.logger.log('Incluyendo fechas de servicio (Concepto 2 o 3)');
       } else {
-        this.logger.log('Omitiendo fechas de servicio (Concepto 1 - Productos)');
+        this.logger.log(
+          'Omitiendo fechas de servicio (Concepto 1 - Productos)',
+        );
       }
-      
+
       const fecaeReq = {
         Auth: {
           Token: authTicket.token,
@@ -1525,9 +1926,15 @@ export class AfipService implements OnModuleInit {
       return new Promise((resolve, reject) => {
         soap.createClient(wsfeUrl, async (err, client) => {
           if (err) {
-            this.logger.error(`Error al crear cliente SOAP WSFE: ${err.message}`);
+            this.logger.error(
+              `Error al crear cliente SOAP WSFE: ${err.message}`,
+            );
             this.logger.error(`Stack: ${err.stack}`);
-            reject(new BadRequestException(`Error al crear cliente SOAP WSFE: ${err.message}`));
+            reject(
+              new BadRequestException(
+                `Error al crear cliente SOAP WSFE: ${err.message}`,
+              ),
+            );
             return;
           }
 
@@ -1536,9 +1943,17 @@ export class AfipService implements OnModuleInit {
           // Llamar al método FECAESolicitar del servicio WSFE
           client.FECAESolicitar(fecaeReq, async (err: any, result: any) => {
             if (err) {
-              this.logger.error(`Error al llamar FECAESolicitar: ${err.message}`);
-              this.logger.error(`Error completo: ${JSON.stringify(err, null, 2)}`);
-              reject(new BadRequestException(`Error al crear factura: ${err.message}`));
+              this.logger.error(
+                `Error al llamar FECAESolicitar: ${err.message}`,
+              );
+              this.logger.error(
+                `Error completo: ${JSON.stringify(err, null, 2)}`,
+              );
+              reject(
+                new BadRequestException(
+                  `Error al crear factura: ${err.message}`,
+                ),
+              );
               return;
             }
 
@@ -1547,7 +1962,7 @@ export class AfipService implements OnModuleInit {
               this.logger.log(JSON.stringify(result, null, 2));
 
               const response = result.FECAESolicitarResult;
-              
+
               // Log de la respuesta completa
               this.logger.log('=== FECAESolicitarResult ===');
               this.logger.log(JSON.stringify(response, null, 2));
@@ -1555,16 +1970,28 @@ export class AfipService implements OnModuleInit {
               // Verificar errores en la cabecera (estructura: Errors.Err[])
               // No rechazar aquí, dejar que se procesen junto con las observaciones del detalle
               if (response.Errors) {
-                const errArray = response.Errors.Err 
-                  ? (Array.isArray(response.Errors.Err) ? response.Errors.Err : [response.Errors.Err])
-                  : (Array.isArray(response.Errors) ? response.Errors : []);
-                
+                const errArray = response.Errors.Err
+                  ? Array.isArray(response.Errors.Err)
+                    ? response.Errors.Err
+                    : [response.Errors.Err]
+                  : Array.isArray(response.Errors)
+                    ? response.Errors
+                    : [];
+
                 if (errArray.length > 0) {
-                  this.logger.error('=== ERRORES CRÍTICOS DE AFIP (Cabecera) ===');
+                  this.logger.error(
+                    '=== ERRORES CRÍTICOS DE AFIP (Cabecera) ===',
+                  );
                   errArray.forEach((error: any, index: number) => {
                     const code = error.Code || error.code || 'N/A';
-                    const msg = error.Msg || error.msg || error.message || JSON.stringify(error);
-                    this.logger.error(`Error ${index + 1}: Code=${code}, Msg=${msg}`);
+                    const msg =
+                      error.Msg ||
+                      error.msg ||
+                      error.message ||
+                      JSON.stringify(error);
+                    this.logger.error(
+                      `Error ${index + 1}: Code=${code}, Msg=${msg}`,
+                    );
                   });
                 }
               }
@@ -1572,17 +1999,31 @@ export class AfipService implements OnModuleInit {
               // Verificar que existe FeDetResp
               if (!response.FeDetResp) {
                 this.logger.error('No se encontró FeDetResp en la respuesta');
-                reject(new BadRequestException('No se recibió respuesta válida de AFIP (sin FeDetResp)'));
+                reject(
+                  new BadRequestException(
+                    'No se recibió respuesta válida de AFIP (sin FeDetResp)',
+                  ),
+                );
                 return;
               }
 
               // Obtener la factura (puede ser array o objeto único)
-              const factura = response.FeDetResp.FECAEDetResponse?.[0] || response.FeDetResp.FECAEDetResponse;
-              
+              const factura =
+                response.FeDetResp.FECAEDetResponse?.[0] ||
+                response.FeDetResp.FECAEDetResponse;
+
               if (!factura) {
-                this.logger.error('No se encontró FECAEDetResponse en la respuesta');
-                this.logger.error(`FeDetResp completo: ${JSON.stringify(response.FeDetResp, null, 2)}`);
-                reject(new BadRequestException('No se recibió respuesta válida de AFIP (sin FECAEDetResponse)'));
+                this.logger.error(
+                  'No se encontró FECAEDetResponse en la respuesta',
+                );
+                this.logger.error(
+                  `FeDetResp completo: ${JSON.stringify(response.FeDetResp, null, 2)}`,
+                );
+                reject(
+                  new BadRequestException(
+                    'No se recibió respuesta válida de AFIP (sin FECAEDetResponse)',
+                  ),
+                );
                 return;
               }
 
@@ -1594,14 +2035,17 @@ export class AfipService implements OnModuleInit {
               // 1. Errors.Err[] a nivel de respuesta (errores críticos)
               // 2. Observaciones.Obs[] en el detalle (observaciones/advertencias)
               let observaciones: string[] = [];
-              let observacionesDetalladas: Array<{ code: number; msg: string }> = [];
+              let observacionesDetalladas: Array<{
+                code: number;
+                msg: string;
+              }> = [];
 
               // Primero, parsear errores críticos de la respuesta completa
               if (response.Errors && response.Errors.Err) {
-                const errArray = Array.isArray(response.Errors.Err) 
-                  ? response.Errors.Err 
+                const errArray = Array.isArray(response.Errors.Err)
+                  ? response.Errors.Err
                   : [response.Errors.Err];
-                
+
                 errArray.forEach((err: any) => {
                   if (err.Code && err.Msg) {
                     const code = Number(err.Code);
@@ -1620,10 +2064,10 @@ export class AfipService implements OnModuleInit {
               if (factura.Observaciones) {
                 // Formato: Observaciones.Obs[] con objetos {Code, Msg}
                 if (factura.Observaciones.Obs) {
-                  const obsArray = Array.isArray(factura.Observaciones.Obs) 
-                    ? factura.Observaciones.Obs 
+                  const obsArray = Array.isArray(factura.Observaciones.Obs)
+                    ? factura.Observaciones.Obs
                     : [factura.Observaciones.Obs];
-                  
+
                   obsArray.forEach((obs: any) => {
                     if (obs.Code && obs.Msg) {
                       const code = Number(obs.Code);
@@ -1674,7 +2118,10 @@ export class AfipService implements OnModuleInit {
                   this.logger.error(`[${obs.code}] ${obs.msg}`);
                 });
               }
-              if (observaciones.length > 0 && observacionesDetalladas.length === 0) {
+              if (
+                observaciones.length > 0 &&
+                observacionesDetalladas.length === 0
+              ) {
                 this.logger.warn('=== OBSERVACIONES DE AFIP ===');
                 observaciones.forEach((obs, index) => {
                   this.logger.warn(`Observación ${index + 1}: ${obs}`);
@@ -1684,13 +2131,13 @@ export class AfipService implements OnModuleInit {
               // Si el resultado es "R" (Rechazado), loggear y lanzar error con detalles
               if (resultado === 'R') {
                 this.logger.error(`=== FACTURA RECHAZADA (R) ===`);
-                
+
                 // Construir mensaje de error más claro
                 let errorMessage = 'Factura rechazada por AFIP';
-                
+
                 if (observacionesDetalladas.length > 0) {
-                  const erroresFormateados = observacionesDetalladas.map(obs => 
-                    `[${obs.code}] ${obs.msg}`
+                  const erroresFormateados = observacionesDetalladas.map(
+                    (obs) => `[${obs.code}] ${obs.msg}`,
                   );
                   errorMessage += ':\n' + erroresFormateados.join('\n');
                 } else if (observaciones.length > 0) {
@@ -1700,23 +2147,28 @@ export class AfipService implements OnModuleInit {
                 }
 
                 this.logger.error(errorMessage);
-                
+
                 // Crear excepción con mensaje estructurado
                 const exception = new BadRequestException(errorMessage);
                 // Agregar información adicional al exception para que el interceptor pueda usarla
-                (exception as any).observaciones = observacionesDetalladas.length > 0 
-                  ? observacionesDetalladas 
-                  : observaciones.map(msg => ({ code: 0, msg }));
-                
+                (exception as any).observaciones =
+                  observacionesDetalladas.length > 0
+                    ? observacionesDetalladas
+                    : observaciones.map((msg) => ({ code: 0, msg }));
+
                 reject(exception);
                 return;
               }
 
               // Si el resultado es "P" (Parcialmente aprobado) o "A" (Aprobado)
               if (resultado === 'A' || resultado === 'P') {
-                this.logger.log(`=== FACTURA ${resultado === 'A' ? 'APROBADA' : 'PARCIALMENTE APROBADA'} ===`);
+                this.logger.log(
+                  `=== FACTURA ${resultado === 'A' ? 'APROBADA' : 'PARCIALMENTE APROBADA'} ===`,
+                );
                 this.logger.log(`CAE: ${factura.CAE}`);
-                this.logger.log(`Número de comprobante: ${factura.CbteDesde || invoiceData.numeroComprobante}`);
+                this.logger.log(
+                  `Número de comprobante: ${factura.CbteDesde || invoiceData.numeroComprobante}`,
+                );
               }
 
               // Generar datos para el código QR (RG 4291)
@@ -1751,8 +2203,11 @@ export class AfipService implements OnModuleInit {
                 cuitEmisor: cuitEmisor,
                 tipoDocReceptor: docTipoValue,
                 nroDocReceptor: String(docNro),
-                observaciones: observaciones.length > 0 ? observaciones : undefined,
-                ...(observacionesDetalladas.length > 0 && { observacionesDetalladas }),
+                observaciones:
+                  observaciones.length > 0 ? observaciones : undefined,
+                ...(observacionesDetalladas.length > 0 && {
+                  observacionesDetalladas,
+                }),
                 ...(qrData && { qrData }),
               };
 
@@ -1762,9 +2217,15 @@ export class AfipService implements OnModuleInit {
 
               resolve(invoiceResponse);
             } catch (parseError: any) {
-              this.logger.error(`Error al procesar respuesta: ${parseError.message}`);
+              this.logger.error(
+                `Error al procesar respuesta: ${parseError.message}`,
+              );
               this.logger.error(`Stack: ${parseError.stack}`);
-              reject(new BadRequestException(`Error al procesar respuesta: ${parseError.message}`));
+              reject(
+                new BadRequestException(
+                  `Error al procesar respuesta: ${parseError.message}`,
+                ),
+              );
             }
           });
         });
@@ -1781,7 +2242,7 @@ export class AfipService implements OnModuleInit {
   /**
    * Genera los datos para el código QR según especificación AFIP RG 4291
    * https://www.afip.gob.ar/fe/qr/especificaciones.asp
-   * 
+   *
    * El QR contiene información del comprobante codificada en base64 y se accede
    * mediante la URL: https://www.afip.gob.ar/fe/qr/?p={datos_base64}
    */
@@ -1800,7 +2261,7 @@ export class AfipService implements OnModuleInit {
   }): QrDataDto {
     // Formatear la fecha de YYYYMMDD a YYYY-MM-DD
     const fechaFormateada = `${params.fecha.substring(0, 4)}-${params.fecha.substring(4, 6)}-${params.fecha.substring(6, 8)}`;
-    
+
     // Estructura JSON según especificación AFIP
     const qrJson = {
       ver: 1,
@@ -1849,15 +2310,26 @@ export class AfipService implements OnModuleInit {
     certificado: string,
     clavePrivada: string,
     homologacion: boolean = false,
-  ): Promise<Array<{ Id: number; Desc: string; FchDesde: string; FchHasta: string }>> {
-    const ticket = await this.getTicket('wsfe', certificado, clavePrivada, homologacion);
+  ): Promise<
+    Array<{ Id: number; Desc: string; FchDesde: string; FchHasta: string }>
+  > {
+    const ticket = await this.getTicket(
+      'wsfe',
+      certificado,
+      clavePrivada,
+      homologacion,
+    );
     const urls = this.getAfipUrls(homologacion);
     const wsfeUrl = urls.wsfe;
 
     return new Promise((resolve, reject) => {
       soap.createClient(wsfeUrl, (err, client) => {
         if (err) {
-          reject(new BadRequestException(`Error al crear cliente SOAP: ${err.message}`));
+          reject(
+            new BadRequestException(
+              `Error al crear cliente SOAP: ${err.message}`,
+            ),
+          );
           return;
         }
 
@@ -1871,11 +2343,16 @@ export class AfipService implements OnModuleInit {
 
         client.FEParamGetTiposCbte(request, (err: any, result: any) => {
           if (err) {
-            reject(new BadRequestException(`Error al obtener tipos de comprobante: ${err.message}`));
+            reject(
+              new BadRequestException(
+                `Error al obtener tipos de comprobante: ${err.message}`,
+              ),
+            );
             return;
           }
 
-          const tipos = result.FEParamGetTiposCbteResult?.ResultGet?.CbteTipo || [];
+          const tipos =
+            result.FEParamGetTiposCbteResult?.ResultGet?.CbteTipo || [];
           const tiposArray = Array.isArray(tipos) ? tipos : [tipos];
           resolve(tiposArray);
         });
@@ -1891,15 +2368,31 @@ export class AfipService implements OnModuleInit {
     certificado: string,
     clavePrivada: string,
     homologacion: boolean = false,
-  ): Promise<Array<{ Nro: number; EmisionTipo: string; Bloqueado: string; FchBaja: string }>> {
-    const ticket = await this.getTicket('wsfe', certificado, clavePrivada, homologacion);
+  ): Promise<
+    Array<{
+      Nro: number;
+      EmisionTipo: string;
+      Bloqueado: string;
+      FchBaja: string;
+    }>
+  > {
+    const ticket = await this.getTicket(
+      'wsfe',
+      certificado,
+      clavePrivada,
+      homologacion,
+    );
     const urls = this.getAfipUrls(homologacion);
     const wsfeUrl = urls.wsfe;
 
     return new Promise((resolve, reject) => {
       soap.createClient(wsfeUrl, (err, client) => {
         if (err) {
-          reject(new BadRequestException(`Error al crear cliente SOAP: ${err.message}`));
+          reject(
+            new BadRequestException(
+              `Error al crear cliente SOAP: ${err.message}`,
+            ),
+          );
           return;
         }
 
@@ -1913,11 +2406,16 @@ export class AfipService implements OnModuleInit {
 
         client.FEParamGetPtosVenta(request, (err: any, result: any) => {
           if (err) {
-            reject(new BadRequestException(`Error al obtener puntos de venta: ${err.message}`));
+            reject(
+              new BadRequestException(
+                `Error al obtener puntos de venta: ${err.message}`,
+              ),
+            );
             return;
           }
 
-          const ptos = result.FEParamGetPtosVentaResult?.ResultGet?.PtoVenta || [];
+          const ptos =
+            result.FEParamGetPtosVentaResult?.ResultGet?.PtoVenta || [];
           const ptosArray = Array.isArray(ptos) ? ptos : [ptos];
           resolve(ptosArray);
         });
@@ -1935,14 +2433,23 @@ export class AfipService implements OnModuleInit {
     claseComprobante?: string, // A, B, C, M
     homologacion: boolean = false,
   ): Promise<Array<{ Id: number; Desc: string; Cmp_Clase: string }>> {
-    const ticket = await this.getTicket('wsfe', certificado, clavePrivada, homologacion);
+    const ticket = await this.getTicket(
+      'wsfe',
+      certificado,
+      clavePrivada,
+      homologacion,
+    );
     const urls = this.getAfipUrls(homologacion);
     const wsfeUrl = urls.wsfe;
 
     return new Promise((resolve, reject) => {
       soap.createClient(wsfeUrl, (err, client) => {
         if (err) {
-          reject(new BadRequestException(`Error al crear cliente SOAP: ${err.message}`));
+          reject(
+            new BadRequestException(
+              `Error al crear cliente SOAP: ${err.message}`,
+            ),
+          );
           return;
         }
 
@@ -1958,16 +2465,27 @@ export class AfipService implements OnModuleInit {
           request.ClaseCmp = claseComprobante;
         }
 
-        client.FEParamGetCondicionIvaReceptor(request, (err: any, result: any) => {
-          if (err) {
-            reject(new BadRequestException(`Error al obtener condiciones IVA: ${err.message}`));
-            return;
-          }
+        client.FEParamGetCondicionIvaReceptor(
+          request,
+          (err: any, result: any) => {
+            if (err) {
+              reject(
+                new BadRequestException(
+                  `Error al obtener condiciones IVA: ${err.message}`,
+                ),
+              );
+              return;
+            }
 
-          const condiciones = result.FEParamGetCondicionIvaReceptorResult?.ResultGet?.CondicionIvaReceptor || [];
-          const condicionesArray = Array.isArray(condiciones) ? condiciones : [condiciones];
-          resolve(condicionesArray);
-        });
+            const condiciones =
+              result.FEParamGetCondicionIvaReceptorResult?.ResultGet
+                ?.CondicionIvaReceptor || [];
+            const condicionesArray = Array.isArray(condiciones)
+              ? condiciones
+              : [condiciones];
+            resolve(condicionesArray);
+          },
+        );
       });
     });
   }
@@ -1978,14 +2496,14 @@ export class AfipService implements OnModuleInit {
 
   /**
    * Consulta las comunicaciones de la Ventanilla Electrónica de AFIP
-   * 
+   *
    * @param cuitRepresentada - CUIT del contribuyente
    * @param certificado - Certificado en formato PEM
    * @param clavePrivada - Clave privada en formato PEM
    * @param filtros - Filtros opcionales (estado, fechas, sistema publicador)
    * @param pagina - Número de página (1-based)
    * @param itemsPorPagina - Items por página (máx 50)
-   * 
+   *
    * @returns Comunicaciones paginadas
    */
   async consultarComunicaciones(
@@ -2026,7 +2544,9 @@ export class AfipService implements OnModuleInit {
       referencia2?: string;
     }>;
   }> {
-    this.logger.log('=== CONSULTANDO COMUNICACIONES VENTANILLA ELECTRÓNICA ===');
+    this.logger.log(
+      '=== CONSULTANDO COMUNICACIONES VENTANILLA ELECTRÓNICA ===',
+    );
     this.logger.log(`CUIT Representada: ${cuitRepresentada}`);
     this.logger.log(`Página: ${pagina}, Items por página: ${itemsPorPagina}`);
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
@@ -2035,122 +2555,171 @@ export class AfipService implements OnModuleInit {
     }
 
     // Obtener ticket para el servicio veconsumerws
-    const ticket = await this.getTicket('veconsumerws', certificado, clavePrivada, homologacion);
-    
+    const ticket = await this.getTicket(
+      'veconsumerws',
+      certificado,
+      clavePrivada,
+      homologacion,
+    );
+
     const urls = this.getAfipUrls(homologacion);
     const ventanillaUrl = urls.ventanilla;
 
     return new Promise((resolve, reject) => {
-      soap.createClient(ventanillaUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
-        if (err) {
-          this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
-          reject(new BadRequestException(`Error al crear cliente SOAP Ventanilla Electrónica: ${err.message}`));
-          return;
-        }
-
-        // Construir el request según la especificación del PDF
-        const request: any = {
-          authRequest: {
-            token: ticket.token,
-            sign: ticket.sign,
-            cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
-          },
-          pagina: pagina,
-          itemsPorPagina: itemsPorPagina,
-        };
-
-        // Agregar filtros si existen
-        if (filtros) {
-          request.filter = {};
-          
-          if (filtros.estado !== undefined) {
-            request.filter.estado = filtros.estado;
-          }
-          if (filtros.fechaDesde) {
-            // Formato esperado: yyyy-MM-dd
-            request.filter.fechaDesde = filtros.fechaDesde;
-          }
-          if (filtros.fechaHasta) {
-            request.filter.fechaHasta = filtros.fechaHasta;
-          }
-          if (filtros.idSistemaPublicador !== undefined) {
-            request.filter.idSistemaPublicador = filtros.idSistemaPublicador;
-          }
-          if (filtros.idComunicacionDesde !== undefined) {
-            request.filter.idComunicacionDesde = filtros.idComunicacionDesde;
-          }
-          if (filtros.idComunicacionHasta !== undefined) {
-            request.filter.idComunicacionHasta = filtros.idComunicacionHasta;
-          }
-        }
-
-        this.logger.log('Request a VE: ' + JSON.stringify(request, null, 2));
-
-        client.consultarComunicaciones(request, (err: any, result: any) => {
+      soap.createClient(
+        ventanillaUrl,
+        { wsdl_options: { timeout: 30000 } },
+        (err, client) => {
           if (err) {
-            this.logger.error(`Error en consultarComunicaciones: ${err.message}`);
-            reject(new BadRequestException(`Error al consultar comunicaciones: ${err.message}`));
+            this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
+            reject(
+              new BadRequestException(
+                `Error al crear cliente SOAP Ventanilla Electrónica: ${err.message}`,
+              ),
+            );
             return;
           }
 
-          try {
-            this.logger.log('Respuesta recibida de VE');
-            
-            // Parsear respuesta según estructura del PDF
-            const respuestaPaginada = result?.consultarComunicacionesResponse?.RespuestaPaginada || 
-                                     result?.RespuestaPaginada || 
-                                     result;
+          // Construir el request según la especificación del PDF
+          const request: any = {
+            authRequest: {
+              token: ticket.token,
+              sign: ticket.sign,
+              cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
+            },
+            pagina: pagina,
+            itemsPorPagina: itemsPorPagina,
+          };
 
-            const items = respuestaPaginada?.items?.item || respuestaPaginada?.items || [];
-            const comunicacionesArray = Array.isArray(items) ? items : (items ? [items] : []);
+          // Agregar filtros si existen
+          if (filtros) {
+            request.filter = {};
 
-            // Mapear las comunicaciones al formato de respuesta
-            const comunicaciones = comunicacionesArray.map((c: any) => ({
-              idComunicacion: Number(c.idComunicacion || c.id),
-              cuitDestinatario: String(c.cuitDestinatario || cuitRepresentada),
-              fechaPublicacion: c.fechaPublicacion || '',
-              fechaVencimiento: c.fechaVencimiento || undefined,
-              sistemaPublicador: Number(c.sistemaPublicador || c.idSistemaPublicador || 0),
-              sistemaPublicadorDesc: c.sistemaPublicadorDesc || c.descSistemaPublicador || '',
-              estado: Number(c.estado || 1),
-              estadoDesc: c.estadoDesc || this.getEstadoDescripcion(Number(c.estado || 1)),
-              asunto: c.asunto || '',
-              prioridad: c.prioridad ? Number(c.prioridad) : undefined,
-              tieneAdjunto: c.tieneAdjunto === true || c.tieneAdjunto === 'true' || c.tieneAdjunto === 1,
-              referencia1: c.referencia1 || undefined,
-              referencia2: c.referencia2 || undefined,
-            }));
-
-            const response = {
-              paginacion: {
-                pagina: Number(respuestaPaginada?.pagina || pagina),
-                totalPaginas: Number(respuestaPaginada?.totalPaginas || 1),
-                itemsPorPagina: Number(respuestaPaginada?.itemsPorPagina || itemsPorPagina),
-                totalItems: Number(respuestaPaginada?.totalItems || comunicaciones.length),
-              },
-              comunicaciones,
-            };
-
-            this.logger.log(`Comunicaciones encontradas: ${response.paginacion.totalItems}`);
-            resolve(response);
-          } catch (parseError: any) {
-            this.logger.error(`Error al parsear respuesta VE: ${parseError.message}`);
-            reject(new BadRequestException(`Error al procesar respuesta de Ventanilla Electrónica: ${parseError.message}`));
+            if (filtros.estado !== undefined) {
+              request.filter.estado = filtros.estado;
+            }
+            if (filtros.fechaDesde) {
+              // Formato esperado: yyyy-MM-dd
+              request.filter.fechaDesde = filtros.fechaDesde;
+            }
+            if (filtros.fechaHasta) {
+              request.filter.fechaHasta = filtros.fechaHasta;
+            }
+            if (filtros.idSistemaPublicador !== undefined) {
+              request.filter.idSistemaPublicador = filtros.idSistemaPublicador;
+            }
+            if (filtros.idComunicacionDesde !== undefined) {
+              request.filter.idComunicacionDesde = filtros.idComunicacionDesde;
+            }
+            if (filtros.idComunicacionHasta !== undefined) {
+              request.filter.idComunicacionHasta = filtros.idComunicacionHasta;
+            }
           }
-        });
-      });
+
+          this.logger.log('Request a VE: ' + JSON.stringify(request, null, 2));
+
+          client.consultarComunicaciones(request, (err: any, result: any) => {
+            if (err) {
+              this.logger.error(
+                `Error en consultarComunicaciones: ${err.message}`,
+              );
+              reject(
+                new BadRequestException(
+                  `Error al consultar comunicaciones: ${err.message}`,
+                ),
+              );
+              return;
+            }
+
+            try {
+              this.logger.log('Respuesta recibida de VE');
+
+              // Parsear respuesta según estructura del PDF
+              const respuestaPaginada =
+                result?.consultarComunicacionesResponse?.RespuestaPaginada ||
+                result?.RespuestaPaginada ||
+                result;
+
+              const items =
+                respuestaPaginada?.items?.item ||
+                respuestaPaginada?.items ||
+                [];
+              const comunicacionesArray = Array.isArray(items)
+                ? items
+                : items
+                  ? [items]
+                  : [];
+
+              // Mapear las comunicaciones al formato de respuesta
+              const comunicaciones = comunicacionesArray.map((c: any) => ({
+                idComunicacion: Number(c.idComunicacion || c.id),
+                cuitDestinatario: String(
+                  c.cuitDestinatario || cuitRepresentada,
+                ),
+                fechaPublicacion: c.fechaPublicacion || '',
+                fechaVencimiento: c.fechaVencimiento || undefined,
+                sistemaPublicador: Number(
+                  c.sistemaPublicador || c.idSistemaPublicador || 0,
+                ),
+                sistemaPublicadorDesc:
+                  c.sistemaPublicadorDesc || c.descSistemaPublicador || '',
+                estado: Number(c.estado || 1),
+                estadoDesc:
+                  c.estadoDesc ||
+                  this.getEstadoDescripcion(Number(c.estado || 1)),
+                asunto: c.asunto || '',
+                prioridad: c.prioridad ? Number(c.prioridad) : undefined,
+                tieneAdjunto:
+                  c.tieneAdjunto === true ||
+                  c.tieneAdjunto === 'true' ||
+                  c.tieneAdjunto === 1,
+                referencia1: c.referencia1 || undefined,
+                referencia2: c.referencia2 || undefined,
+              }));
+
+              const response = {
+                paginacion: {
+                  pagina: Number(respuestaPaginada?.pagina || pagina),
+                  totalPaginas: Number(respuestaPaginada?.totalPaginas || 1),
+                  itemsPorPagina: Number(
+                    respuestaPaginada?.itemsPorPagina || itemsPorPagina,
+                  ),
+                  totalItems: Number(
+                    respuestaPaginada?.totalItems || comunicaciones.length,
+                  ),
+                },
+                comunicaciones,
+              };
+
+              this.logger.log(
+                `Comunicaciones encontradas: ${response.paginacion.totalItems}`,
+              );
+              resolve(response);
+            } catch (parseError: any) {
+              this.logger.error(
+                `Error al parsear respuesta VE: ${parseError.message}`,
+              );
+              reject(
+                new BadRequestException(
+                  `Error al procesar respuesta de Ventanilla Electrónica: ${parseError.message}`,
+                ),
+              );
+            }
+          });
+        },
+      );
     });
   }
 
   /**
    * Consume/lee una comunicación específica de la Ventanilla Electrónica
-   * 
+   *
    * @param cuitRepresentada - CUIT del contribuyente
    * @param certificado - Certificado en formato PEM
    * @param clavePrivada - Clave privada en formato PEM
    * @param idComunicacion - ID de la comunicación a leer
    * @param incluirAdjuntos - Si se incluyen los adjuntos en base64
-   * 
+   *
    * @returns Detalle de la comunicación
    */
   async consumirComunicacion(
@@ -2189,86 +2758,147 @@ export class AfipService implements OnModuleInit {
     this.logger.log(`Incluir Adjuntos: ${incluirAdjuntos}`);
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
-    const ticket = await this.getTicket('veconsumerws', certificado, clavePrivada, homologacion);
-    
+    const ticket = await this.getTicket(
+      'veconsumerws',
+      certificado,
+      clavePrivada,
+      homologacion,
+    );
+
     const urls = this.getAfipUrls(homologacion);
     const ventanillaUrl = urls.ventanilla;
 
     return new Promise((resolve, reject) => {
-      soap.createClient(ventanillaUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
-        if (err) {
-          this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
-          reject(new BadRequestException(`Error al crear cliente SOAP Ventanilla Electrónica: ${err.message}`));
-          return;
-        }
-
-        const request: any = {
-          authRequest: {
-            token: ticket.token,
-            sign: ticket.sign,
-            cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
-          },
-          idComunicacion: idComunicacion,
-        };
-
-        this.logger.log('Request a VE consumirComunicacion: ' + JSON.stringify(request, null, 2));
-
-        client.consumirComunicacion(request, (err: any, result: any) => {
+      soap.createClient(
+        ventanillaUrl,
+        { wsdl_options: { timeout: 30000 } },
+        (err, client) => {
           if (err) {
-            this.logger.error(`Error en consumirComunicacion: ${err.message}`);
-            reject(new BadRequestException(`Error al consumir comunicación: ${err.message}`));
+            this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
+            reject(
+              new BadRequestException(
+                `Error al crear cliente SOAP Ventanilla Electrónica: ${err.message}`,
+              ),
+            );
             return;
           }
 
-          try {
-            this.logger.log('Respuesta recibida de VE (consumirComunicacion)');
-            
-            const comunicacion = result?.consumirComunicacionResponse?.Comunicacion || 
-                               result?.Comunicacion || 
-                               result;
+          const request: any = {
+            authRequest: {
+              token: ticket.token,
+              sign: ticket.sign,
+              cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
+            },
+            idComunicacion: idComunicacion,
+          };
 
-            // Parsear adjuntos si existen
-            let adjuntos: any[] = [];
-            if (comunicacion.adjuntos?.adjunto) {
-              const adjuntosData = Array.isArray(comunicacion.adjuntos.adjunto) 
-                ? comunicacion.adjuntos.adjunto 
-                : [comunicacion.adjuntos.adjunto];
-              
-              adjuntos = adjuntosData.map((adj: any) => ({
-                nombre: adj.nombre || adj.fileName || '',
-                tipoMime: adj.tipoMime || adj.mimeType || 'application/octet-stream',
-                contenidoBase64: incluirAdjuntos ? (adj.contenido || adj.content || '') : undefined,
-                tamanio: adj.tamanio ? Number(adj.tamanio) : undefined,
-              }));
+          this.logger.log(
+            'Request a VE consumirComunicacion: ' +
+              JSON.stringify(request, null, 2),
+          );
+
+          client.consumirComunicacion(request, (err: any, result: any) => {
+            if (err) {
+              this.logger.error(
+                `Error en consumirComunicacion: ${err.message}`,
+              );
+              reject(
+                new BadRequestException(
+                  `Error al consumir comunicación: ${err.message}`,
+                ),
+              );
+              return;
             }
 
-            const response = {
-              idComunicacion: Number(comunicacion.idComunicacion || comunicacion.id || idComunicacion),
-              cuitDestinatario: String(comunicacion.cuitDestinatario || cuitRepresentada),
-              fechaPublicacion: comunicacion.fechaPublicacion || '',
-              fechaVencimiento: comunicacion.fechaVencimiento || undefined,
-              sistemaPublicador: Number(comunicacion.sistemaPublicador || comunicacion.idSistemaPublicador || 0),
-              sistemaPublicadorDesc: comunicacion.sistemaPublicadorDesc || comunicacion.descSistemaPublicador || '',
-              estado: Number(comunicacion.estado || 2), // 2 = Leída (ya que la estamos consumiendo)
-              estadoDesc: comunicacion.estadoDesc || this.getEstadoDescripcion(Number(comunicacion.estado || 2)),
-              asunto: comunicacion.asunto || '',
-              prioridad: comunicacion.prioridad ? Number(comunicacion.prioridad) : undefined,
-              tieneAdjunto: adjuntos.length > 0 || comunicacion.tieneAdjunto === true,
-              referencia1: comunicacion.referencia1 || undefined,
-              referencia2: comunicacion.referencia2 || undefined,
-              cuerpo: comunicacion.cuerpo || comunicacion.mensaje || comunicacion.body || '',
-              adjuntos: adjuntos.length > 0 ? adjuntos : undefined,
-              fechaLectura: comunicacion.fechaLectura || new Date().toISOString(),
-            };
+            try {
+              this.logger.log(
+                'Respuesta recibida de VE (consumirComunicacion)',
+              );
 
-            this.logger.log(`Comunicación leída exitosamente: ${response.idComunicacion}`);
-            resolve(response);
-          } catch (parseError: any) {
-            this.logger.error(`Error al parsear comunicación: ${parseError.message}`);
-            reject(new BadRequestException(`Error al procesar comunicación: ${parseError.message}`));
-          }
-        });
-      });
+              const comunicacion =
+                result?.consumirComunicacionResponse?.Comunicacion ||
+                result?.Comunicacion ||
+                result;
+
+              // Parsear adjuntos si existen
+              let adjuntos: any[] = [];
+              if (comunicacion.adjuntos?.adjunto) {
+                const adjuntosData = Array.isArray(
+                  comunicacion.adjuntos.adjunto,
+                )
+                  ? comunicacion.adjuntos.adjunto
+                  : [comunicacion.adjuntos.adjunto];
+
+                adjuntos = adjuntosData.map((adj: any) => ({
+                  nombre: adj.nombre || adj.fileName || '',
+                  tipoMime:
+                    adj.tipoMime || adj.mimeType || 'application/octet-stream',
+                  contenidoBase64: incluirAdjuntos
+                    ? adj.contenido || adj.content || ''
+                    : undefined,
+                  tamanio: adj.tamanio ? Number(adj.tamanio) : undefined,
+                }));
+              }
+
+              const response = {
+                idComunicacion: Number(
+                  comunicacion.idComunicacion ||
+                    comunicacion.id ||
+                    idComunicacion,
+                ),
+                cuitDestinatario: String(
+                  comunicacion.cuitDestinatario || cuitRepresentada,
+                ),
+                fechaPublicacion: comunicacion.fechaPublicacion || '',
+                fechaVencimiento: comunicacion.fechaVencimiento || undefined,
+                sistemaPublicador: Number(
+                  comunicacion.sistemaPublicador ||
+                    comunicacion.idSistemaPublicador ||
+                    0,
+                ),
+                sistemaPublicadorDesc:
+                  comunicacion.sistemaPublicadorDesc ||
+                  comunicacion.descSistemaPublicador ||
+                  '',
+                estado: Number(comunicacion.estado || 2), // 2 = Leída (ya que la estamos consumiendo)
+                estadoDesc:
+                  comunicacion.estadoDesc ||
+                  this.getEstadoDescripcion(Number(comunicacion.estado || 2)),
+                asunto: comunicacion.asunto || '',
+                prioridad: comunicacion.prioridad
+                  ? Number(comunicacion.prioridad)
+                  : undefined,
+                tieneAdjunto:
+                  adjuntos.length > 0 || comunicacion.tieneAdjunto === true,
+                referencia1: comunicacion.referencia1 || undefined,
+                referencia2: comunicacion.referencia2 || undefined,
+                cuerpo:
+                  comunicacion.cuerpo ||
+                  comunicacion.mensaje ||
+                  comunicacion.body ||
+                  '',
+                adjuntos: adjuntos.length > 0 ? adjuntos : undefined,
+                fechaLectura:
+                  comunicacion.fechaLectura || new Date().toISOString(),
+              };
+
+              this.logger.log(
+                `Comunicación leída exitosamente: ${response.idComunicacion}`,
+              );
+              resolve(response);
+            } catch (parseError: any) {
+              this.logger.error(
+                `Error al parsear comunicación: ${parseError.message}`,
+              );
+              reject(
+                new BadRequestException(
+                  `Error al procesar comunicación: ${parseError.message}`,
+                ),
+              );
+            }
+          });
+        },
+      );
     });
   }
 
@@ -2281,69 +2911,107 @@ export class AfipService implements OnModuleInit {
     clavePrivada: string,
     idSistemaPublicador?: number,
     homologacion: boolean = false,
-  ): Promise<Array<{
-    id: number;
-    descripcion: string;
-    certCN?: string;
-    subservicios?: string[];
-  }>> {
+  ): Promise<
+    Array<{
+      id: number;
+      descripcion: string;
+      certCN?: string;
+      subservicios?: string[];
+    }>
+  > {
     this.logger.log('=== CONSULTANDO SISTEMAS PUBLICADORES VE ===');
     this.logger.log(`CUIT Representada: ${cuitRepresentada}`);
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
-    const ticket = await this.getTicket('veconsumerws', certificado, clavePrivada, homologacion);
-    
+    const ticket = await this.getTicket(
+      'veconsumerws',
+      certificado,
+      clavePrivada,
+      homologacion,
+    );
+
     const urls = this.getAfipUrls(homologacion);
     const ventanillaUrl = urls.ventanilla;
 
     return new Promise((resolve, reject) => {
-      soap.createClient(ventanillaUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
-        if (err) {
-          this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
-          reject(new BadRequestException(`Error al crear cliente SOAP VE: ${err.message}`));
-          return;
-        }
-
-        const request: any = {
-          authRequest: {
-            token: ticket.token,
-            sign: ticket.sign,
-            cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
-          },
-        };
-
-        if (idSistemaPublicador !== undefined) {
-          request.idSistemaPublicador = idSistemaPublicador;
-        }
-
-        client.consultarSistemasPublicadores(request, (err: any, result: any) => {
+      soap.createClient(
+        ventanillaUrl,
+        { wsdl_options: { timeout: 30000 } },
+        (err, client) => {
           if (err) {
-            this.logger.error(`Error en consultarSistemasPublicadores: ${err.message}`);
-            reject(new BadRequestException(`Error al consultar sistemas publicadores: ${err.message}`));
+            this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
+            reject(
+              new BadRequestException(
+                `Error al crear cliente SOAP VE: ${err.message}`,
+              ),
+            );
             return;
           }
 
-          try {
-            const sistemas = result?.consultarSistemasPublicadoresResponse?.Sistemas?.Sistema ||
-                           result?.Sistemas?.Sistema ||
-                           [];
-            const sistemasArray = Array.isArray(sistemas) ? sistemas : (sistemas ? [sistemas] : []);
+          const request: any = {
+            authRequest: {
+              token: ticket.token,
+              sign: ticket.sign,
+              cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
+            },
+          };
 
-            const response = sistemasArray.map((s: any) => ({
-              id: Number(s.id),
-              descripcion: s.descripcion || '',
-              certCN: s.certCN || undefined,
-              subservicios: s.subservicios?.subservicio || undefined,
-            }));
-
-            this.logger.log(`Sistemas publicadores encontrados: ${response.length}`);
-            resolve(response);
-          } catch (parseError: any) {
-            this.logger.error(`Error al parsear sistemas publicadores: ${parseError.message}`);
-            reject(new BadRequestException(`Error al procesar sistemas publicadores: ${parseError.message}`));
+          if (idSistemaPublicador !== undefined) {
+            request.idSistemaPublicador = idSistemaPublicador;
           }
-        });
-      });
+
+          client.consultarSistemasPublicadores(
+            request,
+            (err: any, result: any) => {
+              if (err) {
+                this.logger.error(
+                  `Error en consultarSistemasPublicadores: ${err.message}`,
+                );
+                reject(
+                  new BadRequestException(
+                    `Error al consultar sistemas publicadores: ${err.message}`,
+                  ),
+                );
+                return;
+              }
+
+              try {
+                const sistemas =
+                  result?.consultarSistemasPublicadoresResponse?.Sistemas
+                    ?.Sistema ||
+                  result?.Sistemas?.Sistema ||
+                  [];
+                const sistemasArray = Array.isArray(sistemas)
+                  ? sistemas
+                  : sistemas
+                    ? [sistemas]
+                    : [];
+
+                const response = sistemasArray.map((s: any) => ({
+                  id: Number(s.id),
+                  descripcion: s.descripcion || '',
+                  certCN: s.certCN || undefined,
+                  subservicios: s.subservicios?.subservicio || undefined,
+                }));
+
+                this.logger.log(
+                  `Sistemas publicadores encontrados: ${response.length}`,
+                );
+                resolve(response);
+              } catch (parseError: any) {
+                this.logger.error(
+                  `Error al parsear sistemas publicadores: ${parseError.message}`,
+                );
+                reject(
+                  new BadRequestException(
+                    `Error al procesar sistemas publicadores: ${parseError.message}`,
+                  ),
+                );
+              }
+            },
+          );
+        },
+      );
     });
   }
 
@@ -2355,70 +3023,100 @@ export class AfipService implements OnModuleInit {
     certificado: string,
     clavePrivada: string,
     homologacion: boolean = false,
-  ): Promise<Array<{
-    codigo: number;
-    descripcion: string;
-  }>> {
+  ): Promise<
+    Array<{
+      codigo: number;
+      descripcion: string;
+    }>
+  > {
     this.logger.log('=== CONSULTANDO ESTADOS DE COMUNICACIÓN VE ===');
     this.logger.log(`CUIT Representada: ${cuitRepresentada}`);
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
-    const ticket = await this.getTicket('veconsumerws', certificado, clavePrivada, homologacion);
-    
+    const ticket = await this.getTicket(
+      'veconsumerws',
+      certificado,
+      clavePrivada,
+      homologacion,
+    );
+
     const urls = this.getAfipUrls(homologacion);
     const ventanillaUrl = urls.ventanilla;
 
     return new Promise((resolve, reject) => {
-      soap.createClient(ventanillaUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
-        if (err) {
-          this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
-          reject(new BadRequestException(`Error al crear cliente SOAP VE: ${err.message}`));
-          return;
-        }
-
-        const request = {
-          authRequest: {
-            token: ticket.token,
-            sign: ticket.sign,
-            cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
-          },
-        };
-
-        client.consultarEstados(request, (err: any, result: any) => {
+      soap.createClient(
+        ventanillaUrl,
+        { wsdl_options: { timeout: 30000 } },
+        (err, client) => {
           if (err) {
-            this.logger.error(`Error en consultarEstados: ${err.message}`);
-            reject(new BadRequestException(`Error al consultar estados: ${err.message}`));
+            this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
+            reject(
+              new BadRequestException(
+                `Error al crear cliente SOAP VE: ${err.message}`,
+              ),
+            );
             return;
           }
 
-          try {
-            const estados = result?.consultarEstadosResponse?.Estados?.Estado ||
-                          result?.Estados?.Estado ||
-                          [];
-            const estadosArray = Array.isArray(estados) ? estados : (estados ? [estados] : []);
+          const request = {
+            authRequest: {
+              token: ticket.token,
+              sign: ticket.sign,
+              cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
+            },
+          };
 
-            const response = estadosArray.map((e: any) => ({
-              codigo: Number(e.id || e.codigo),
-              descripcion: e.descripcion || '',
-            }));
-
-            // Si no hay estados del servicio, devolver los estándar
-            if (response.length === 0) {
-              resolve([
-                { codigo: 1, descripcion: 'No leída' },
-                { codigo: 2, descripcion: 'Leída' },
-              ]);
+          client.consultarEstados(request, (err: any, result: any) => {
+            if (err) {
+              this.logger.error(`Error en consultarEstados: ${err.message}`);
+              reject(
+                new BadRequestException(
+                  `Error al consultar estados: ${err.message}`,
+                ),
+              );
               return;
             }
 
-            this.logger.log(`Estados encontrados: ${response.length}`);
-            resolve(response);
-          } catch (parseError: any) {
-            this.logger.error(`Error al parsear estados: ${parseError.message}`);
-            reject(new BadRequestException(`Error al procesar estados: ${parseError.message}`));
-          }
-        });
-      });
+            try {
+              const estados =
+                result?.consultarEstadosResponse?.Estados?.Estado ||
+                result?.Estados?.Estado ||
+                [];
+              const estadosArray = Array.isArray(estados)
+                ? estados
+                : estados
+                  ? [estados]
+                  : [];
+
+              const response = estadosArray.map((e: any) => ({
+                codigo: Number(e.id || e.codigo),
+                descripcion: e.descripcion || '',
+              }));
+
+              // Si no hay estados del servicio, devolver los estándar
+              if (response.length === 0) {
+                resolve([
+                  { codigo: 1, descripcion: 'No leída' },
+                  { codigo: 2, descripcion: 'Leída' },
+                ]);
+                return;
+              }
+
+              this.logger.log(`Estados encontrados: ${response.length}`);
+              resolve(response);
+            } catch (parseError: any) {
+              this.logger.error(
+                `Error al parsear estados: ${parseError.message}`,
+              );
+              reject(
+                new BadRequestException(
+                  `Error al procesar estados: ${parseError.message}`,
+                ),
+              );
+            }
+          });
+        },
+      );
     });
   }
 
@@ -2439,7 +3137,7 @@ export class AfipService implements OnModuleInit {
 
   /**
    * Constata/verifica un comprobante específico
-   * 
+   *
    * @param cuitEmisor - CUIT del emisor
    * @param certificado - Certificado en formato PEM
    * @param clavePrivada - Clave privada en formato PEM
@@ -2447,7 +3145,7 @@ export class AfipService implements OnModuleInit {
    * @param tipoComprobante - Tipo de comprobante
    * @param numeroComprobante - Número de comprobante
    * @param cuitEmisorComprobante - CUIT del emisor del comprobante (opcional, para verificar comprobantes de terceros)
-   * 
+   *
    * @returns Resultado de la constatación
    */
   async constatarComprobante(
@@ -2476,103 +3174,153 @@ export class AfipService implements OnModuleInit {
   }> {
     this.logger.log('=== CONSTATANDO COMPROBANTE WSCDC ===');
     this.logger.log(`CUIT Emisor: ${cuitEmisor}`);
-    this.logger.log(`Punto Venta: ${puntoVenta}, Tipo: ${tipoComprobante}, Nro: ${numeroComprobante}`);
+    this.logger.log(
+      `Punto Venta: ${puntoVenta}, Tipo: ${tipoComprobante}, Nro: ${numeroComprobante}`,
+    );
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
     if (cuitEmisorComprobante) {
       this.logger.log(`CUIT Emisor Comprobante: ${cuitEmisorComprobante}`);
     }
 
-    const ticket = await this.getTicket('wscdc', certificado, clavePrivada, homologacion);
-    
+    const ticket = await this.getTicket(
+      'wscdc',
+      certificado,
+      clavePrivada,
+      homologacion,
+    );
+
     const urls = this.getAfipUrls(homologacion);
     const wscdcUrl = urls.wscdc;
 
     return new Promise((resolve, reject) => {
-      soap.createClient(wscdcUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
-        if (err) {
-          this.logger.error(`Error al crear cliente SOAP WSCDC: ${err.message}`);
-          reject(new BadRequestException(`Error al crear cliente SOAP WSCDC: ${err.message}`));
-          return;
-        }
-
-        const request: any = {
-          auth: {
-            token: ticket.token,
-            sign: ticket.sign,
-            cuit: cuitEmisor.replace(/-/g, ''),
-          },
-          puntoVenta: puntoVenta,
-          tipoComprobante: tipoComprobante,
-          numeroComprobante: numeroComprobante,
-        };
-
-        if (cuitEmisorComprobante) {
-          request.cuitEmisorComprobante = cuitEmisorComprobante.replace(/-/g, '');
-        }
-
-        this.logger.log('Request a WSCDC ComprobanteConstatar: ' + JSON.stringify(request, null, 2));
-
-        client.ComprobanteConstatar(request, (err: any, result: any) => {
+      soap.createClient(
+        wscdcUrl,
+        { wsdl_options: { timeout: 30000 } },
+        (err, client) => {
           if (err) {
-            this.logger.error(`Error en ComprobanteConstatar: ${err.message}`);
-            reject(new BadRequestException(`Error al constatar comprobante: ${err.message}`));
+            this.logger.error(
+              `Error al crear cliente SOAP WSCDC: ${err.message}`,
+            );
+            reject(
+              new BadRequestException(
+                `Error al crear cliente SOAP WSCDC: ${err.message}`,
+              ),
+            );
             return;
           }
 
-          try {
-            this.logger.log('Respuesta recibida de WSCDC (ComprobanteConstatar)');
-            this.logger.log(JSON.stringify(result, null, 2));
+          const request: any = {
+            auth: {
+              token: ticket.token,
+              sign: ticket.sign,
+              cuit: cuitEmisor.replace(/-/g, ''),
+            },
+            puntoVenta: puntoVenta,
+            tipoComprobante: tipoComprobante,
+            numeroComprobante: numeroComprobante,
+          };
 
-            const responseData = result?.ComprobanteConstatarResult || result?.Result || result;
-            
-            // Parsear errores
-            let errors: Array<{ code: number; msg: string }> = [];
-            if (responseData.Errors?.Err) {
-              const errArray = Array.isArray(responseData.Errors.Err) 
-                ? responseData.Errors.Err 
-                : [responseData.Errors.Err];
-              errors = errArray.map((e: any) => ({
-                code: Number(e.Code || e.code),
-                msg: e.Msg || e.msg || '',
-              }));
-            }
-
-            // Parsear eventos
-            let events: Array<{ code: number; msg: string }> = [];
-            if (responseData.Events?.Evt) {
-              const evtArray = Array.isArray(responseData.Events.Evt) 
-                ? responseData.Events.Evt 
-                : [responseData.Events.Evt];
-              events = evtArray.map((e: any) => ({
-                code: Number(e.Code || e.code),
-                msg: e.Msg || e.msg || '',
-              }));
-            }
-
-            const response = {
-              resultado: responseData.Resultado || responseData.resultado || 'R',
-              codigoAutorizacion: responseData.CodigoAutorizacion || responseData.codigoAutorizacion,
-              fechaEmision: responseData.FechaEmision || responseData.fechaEmision,
-              fechaVencimiento: responseData.FechaVencimiento || responseData.fechaVencimiento,
-              importeTotal: responseData.ImporteTotal ? Number(responseData.ImporteTotal) : undefined,
-              estado: responseData.Estado || responseData.estado,
-              puntoVenta: puntoVenta,
-              tipoComprobante: tipoComprobante,
-              numeroComprobante: numeroComprobante,
-              cuitEmisor: responseData.CuitEmisor || responseData.cuitEmisor || cuitEmisor,
-              cuitReceptor: responseData.CuitReceptor || responseData.cuitReceptor,
-              errors: errors.length > 0 ? errors : undefined,
-              events: events.length > 0 ? events : undefined,
-            };
-
-            this.logger.log(`Comprobante constatado: ${response.resultado}`);
-            resolve(response);
-          } catch (parseError: any) {
-            this.logger.error(`Error al parsear respuesta WSCDC: ${parseError.message}`);
-            reject(new BadRequestException(`Error al procesar respuesta de WSCDC: ${parseError.message}`));
+          if (cuitEmisorComprobante) {
+            request.cuitEmisorComprobante = cuitEmisorComprobante.replace(
+              /-/g,
+              '',
+            );
           }
-        });
-      });
+
+          this.logger.log(
+            'Request a WSCDC ComprobanteConstatar: ' +
+              JSON.stringify(request, null, 2),
+          );
+
+          client.ComprobanteConstatar(request, (err: any, result: any) => {
+            if (err) {
+              this.logger.error(
+                `Error en ComprobanteConstatar: ${err.message}`,
+              );
+              reject(
+                new BadRequestException(
+                  `Error al constatar comprobante: ${err.message}`,
+                ),
+              );
+              return;
+            }
+
+            try {
+              this.logger.log(
+                'Respuesta recibida de WSCDC (ComprobanteConstatar)',
+              );
+              this.logger.log(JSON.stringify(result, null, 2));
+
+              const responseData =
+                result?.ComprobanteConstatarResult || result?.Result || result;
+
+              // Parsear errores
+              let errors: Array<{ code: number; msg: string }> = [];
+              if (responseData.Errors?.Err) {
+                const errArray = Array.isArray(responseData.Errors.Err)
+                  ? responseData.Errors.Err
+                  : [responseData.Errors.Err];
+                errors = errArray.map((e: any) => ({
+                  code: Number(e.Code || e.code),
+                  msg: e.Msg || e.msg || '',
+                }));
+              }
+
+              // Parsear eventos
+              let events: Array<{ code: number; msg: string }> = [];
+              if (responseData.Events?.Evt) {
+                const evtArray = Array.isArray(responseData.Events.Evt)
+                  ? responseData.Events.Evt
+                  : [responseData.Events.Evt];
+                events = evtArray.map((e: any) => ({
+                  code: Number(e.Code || e.code),
+                  msg: e.Msg || e.msg || '',
+                }));
+              }
+
+              const response = {
+                resultado:
+                  responseData.Resultado || responseData.resultado || 'R',
+                codigoAutorizacion:
+                  responseData.CodigoAutorizacion ||
+                  responseData.codigoAutorizacion,
+                fechaEmision:
+                  responseData.FechaEmision || responseData.fechaEmision,
+                fechaVencimiento:
+                  responseData.FechaVencimiento ||
+                  responseData.fechaVencimiento,
+                importeTotal: responseData.ImporteTotal
+                  ? Number(responseData.ImporteTotal)
+                  : undefined,
+                estado: responseData.Estado || responseData.estado,
+                puntoVenta: puntoVenta,
+                tipoComprobante: tipoComprobante,
+                numeroComprobante: numeroComprobante,
+                cuitEmisor:
+                  responseData.CuitEmisor ||
+                  responseData.cuitEmisor ||
+                  cuitEmisor,
+                cuitReceptor:
+                  responseData.CuitReceptor || responseData.cuitReceptor,
+                errors: errors.length > 0 ? errors : undefined,
+                events: events.length > 0 ? events : undefined,
+              };
+
+              this.logger.log(`Comprobante constatado: ${response.resultado}`);
+              resolve(response);
+            } catch (parseError: any) {
+              this.logger.error(
+                `Error al parsear respuesta WSCDC: ${parseError.message}`,
+              );
+              reject(
+                new BadRequestException(
+                  `Error al procesar respuesta de WSCDC: ${parseError.message}`,
+                ),
+              );
+            }
+          });
+        },
+      );
     });
   }
 
@@ -2585,7 +3333,12 @@ export class AfipService implements OnModuleInit {
     clavePrivada: string,
     homologacion: boolean = false,
   ): Promise<{
-    modalidades: Array<{ Id: number; Desc: string; FchDesde: string; FchHasta?: string }>;
+    modalidades: Array<{
+      Id: number;
+      Desc: string;
+      FchDesde: string;
+      FchHasta?: string;
+    }>;
     errors?: Array<{ code: number; msg: string }>;
     events?: Array<{ code: number; msg: string }>;
   }> {
@@ -2593,70 +3346,124 @@ export class AfipService implements OnModuleInit {
     this.logger.log(`CUIT Emisor: ${cuitEmisor}`);
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
-    const ticket = await this.getTicket('wscdc', certificado, clavePrivada, homologacion);
-    
+    const ticket = await this.getTicket(
+      'wscdc',
+      certificado,
+      clavePrivada,
+      homologacion,
+    );
+
     const urls = this.getAfipUrls(homologacion);
     const wscdcUrl = urls.wscdc;
 
     return new Promise((resolve, reject) => {
-      soap.createClient(wscdcUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
-        if (err) {
-          this.logger.error(`Error al crear cliente SOAP WSCDC: ${err.message}`);
-          reject(new BadRequestException(`Error al crear cliente SOAP WSCDC: ${err.message}`));
-          return;
-        }
-
-        const request = {
-          auth: {
-            token: ticket.token,
-            sign: ticket.sign,
-            cuit: cuitEmisor.replace(/-/g, ''),
-          },
-        };
-
-        client.ComprobantesModalidadConsultar(request, (err: any, result: any) => {
+      soap.createClient(
+        wscdcUrl,
+        { wsdl_options: { timeout: 30000 } },
+        (err, client) => {
           if (err) {
-            this.logger.error(`Error en ComprobantesModalidadConsultar: ${err.message}`);
-            reject(new BadRequestException(`Error al consultar modalidades: ${err.message}`));
+            this.logger.error(
+              `Error al crear cliente SOAP WSCDC: ${err.message}`,
+            );
+            reject(
+              new BadRequestException(
+                `Error al crear cliente SOAP WSCDC: ${err.message}`,
+              ),
+            );
             return;
           }
 
-          try {
-            const responseData = result?.ComprobantesModalidadConsultarResult || result?.Result || result;
-            const resultGet = responseData?.ResultGet || responseData;
-            
-            // Parsear modalidades
-            const modalidadesData = resultGet?.Modalidad || resultGet?.modalidad || [];
-            const modalidadesArray = Array.isArray(modalidadesData) ? modalidadesData : (modalidadesData ? [modalidadesData] : []);
+          const request = {
+            auth: {
+              token: ticket.token,
+              sign: ticket.sign,
+              cuit: cuitEmisor.replace(/-/g, ''),
+            },
+          };
 
-            const modalidades = modalidadesArray.map((m: any) => ({
-              Id: Number(m.Id || m.id),
-              Desc: m.Desc || m.desc || '',
-              FchDesde: m.FchDesde || m.fchDesde || '',
-              FchHasta: m.FchHasta || m.fchHasta,
-            }));
+          client.ComprobantesModalidadConsultar(
+            request,
+            (err: any, result: any) => {
+              if (err) {
+                this.logger.error(
+                  `Error en ComprobantesModalidadConsultar: ${err.message}`,
+                );
+                reject(
+                  new BadRequestException(
+                    `Error al consultar modalidades: ${err.message}`,
+                  ),
+                );
+                return;
+              }
 
-            // Parsear errores y eventos
-            let errors: Array<{ code: number; msg: string }> = [];
-            if (responseData.Errors?.Err) {
-              const errArray = Array.isArray(responseData.Errors.Err) ? responseData.Errors.Err : [responseData.Errors.Err];
-              errors = errArray.map((e: any) => ({ code: Number(e.Code || e.code), msg: e.Msg || e.msg || '' }));
-            }
+              try {
+                const responseData =
+                  result?.ComprobantesModalidadConsultarResult ||
+                  result?.Result ||
+                  result;
+                const resultGet = responseData?.ResultGet || responseData;
 
-            let events: Array<{ code: number; msg: string }> = [];
-            if (responseData.Events?.Evt) {
-              const evtArray = Array.isArray(responseData.Events.Evt) ? responseData.Events.Evt : [responseData.Events.Evt];
-              events = evtArray.map((e: any) => ({ code: Number(e.Code || e.code), msg: e.Msg || e.msg || '' }));
-            }
+                // Parsear modalidades
+                const modalidadesData =
+                  resultGet?.Modalidad || resultGet?.modalidad || [];
+                const modalidadesArray = Array.isArray(modalidadesData)
+                  ? modalidadesData
+                  : modalidadesData
+                    ? [modalidadesData]
+                    : [];
 
-            this.logger.log(`Modalidades encontradas: ${modalidades.length}`);
-            resolve({ modalidades, errors: errors.length > 0 ? errors : undefined, events: events.length > 0 ? events : undefined });
-          } catch (parseError: any) {
-            this.logger.error(`Error al parsear modalidades: ${parseError.message}`);
-            reject(new BadRequestException(`Error al procesar modalidades: ${parseError.message}`));
-          }
-        });
-      });
+                const modalidades = modalidadesArray.map((m: any) => ({
+                  Id: Number(m.Id || m.id),
+                  Desc: m.Desc || m.desc || '',
+                  FchDesde: m.FchDesde || m.fchDesde || '',
+                  FchHasta: m.FchHasta || m.fchHasta,
+                }));
+
+                // Parsear errores y eventos
+                let errors: Array<{ code: number; msg: string }> = [];
+                if (responseData.Errors?.Err) {
+                  const errArray = Array.isArray(responseData.Errors.Err)
+                    ? responseData.Errors.Err
+                    : [responseData.Errors.Err];
+                  errors = errArray.map((e: any) => ({
+                    code: Number(e.Code || e.code),
+                    msg: e.Msg || e.msg || '',
+                  }));
+                }
+
+                let events: Array<{ code: number; msg: string }> = [];
+                if (responseData.Events?.Evt) {
+                  const evtArray = Array.isArray(responseData.Events.Evt)
+                    ? responseData.Events.Evt
+                    : [responseData.Events.Evt];
+                  events = evtArray.map((e: any) => ({
+                    code: Number(e.Code || e.code),
+                    msg: e.Msg || e.msg || '',
+                  }));
+                }
+
+                this.logger.log(
+                  `Modalidades encontradas: ${modalidades.length}`,
+                );
+                resolve({
+                  modalidades,
+                  errors: errors.length > 0 ? errors : undefined,
+                  events: events.length > 0 ? events : undefined,
+                });
+              } catch (parseError: any) {
+                this.logger.error(
+                  `Error al parsear modalidades: ${parseError.message}`,
+                );
+                reject(
+                  new BadRequestException(
+                    `Error al procesar modalidades: ${parseError.message}`,
+                  ),
+                );
+              }
+            },
+          );
+        },
+      );
     });
   }
 
@@ -2669,7 +3476,12 @@ export class AfipService implements OnModuleInit {
     clavePrivada: string,
     homologacion: boolean = false,
   ): Promise<{
-    tipos: Array<{ Id: number; Desc: string; FchDesde: string; FchHasta?: string }>;
+    tipos: Array<{
+      Id: number;
+      Desc: string;
+      FchDesde: string;
+      FchHasta?: string;
+    }>;
     errors?: Array<{ code: number; msg: string }>;
     events?: Array<{ code: number; msg: string }>;
   }> {
@@ -2677,68 +3489,119 @@ export class AfipService implements OnModuleInit {
     this.logger.log(`CUIT Emisor: ${cuitEmisor}`);
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
-    const ticket = await this.getTicket('wscdc', certificado, clavePrivada, homologacion);
-    
+    const ticket = await this.getTicket(
+      'wscdc',
+      certificado,
+      clavePrivada,
+      homologacion,
+    );
+
     const urls = this.getAfipUrls(homologacion);
     const wscdcUrl = urls.wscdc;
 
     return new Promise((resolve, reject) => {
-      soap.createClient(wscdcUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
-        if (err) {
-          this.logger.error(`Error al crear cliente SOAP WSCDC: ${err.message}`);
-          reject(new BadRequestException(`Error al crear cliente SOAP WSCDC: ${err.message}`));
-          return;
-        }
-
-        const request = {
-          auth: {
-            token: ticket.token,
-            sign: ticket.sign,
-            cuit: cuitEmisor.replace(/-/g, ''),
-          },
-        };
-
-        client.ComprobantesTipoConsultar(request, (err: any, result: any) => {
+      soap.createClient(
+        wscdcUrl,
+        { wsdl_options: { timeout: 30000 } },
+        (err, client) => {
           if (err) {
-            this.logger.error(`Error en ComprobantesTipoConsultar: ${err.message}`);
-            reject(new BadRequestException(`Error al consultar tipos de comprobante: ${err.message}`));
+            this.logger.error(
+              `Error al crear cliente SOAP WSCDC: ${err.message}`,
+            );
+            reject(
+              new BadRequestException(
+                `Error al crear cliente SOAP WSCDC: ${err.message}`,
+              ),
+            );
             return;
           }
 
-          try {
-            const responseData = result?.ComprobantesTipoConsultarResult || result?.Result || result;
-            const resultGet = responseData?.ResultGet || responseData;
-            
-            const tiposData = resultGet?.CbteTipo || resultGet?.cbteTipo || [];
-            const tiposArray = Array.isArray(tiposData) ? tiposData : (tiposData ? [tiposData] : []);
+          const request = {
+            auth: {
+              token: ticket.token,
+              sign: ticket.sign,
+              cuit: cuitEmisor.replace(/-/g, ''),
+            },
+          };
 
-            const tipos = tiposArray.map((t: any) => ({
-              Id: Number(t.Id || t.id),
-              Desc: t.Desc || t.desc || '',
-              FchDesde: t.FchDesde || t.fchDesde || '',
-              FchHasta: t.FchHasta || t.fchHasta,
-            }));
-
-            let errors: Array<{ code: number; msg: string }> = [];
-            if (responseData.Errors?.Err) {
-              const errArray = Array.isArray(responseData.Errors.Err) ? responseData.Errors.Err : [responseData.Errors.Err];
-              errors = errArray.map((e: any) => ({ code: Number(e.Code || e.code), msg: e.Msg || e.msg || '' }));
+          client.ComprobantesTipoConsultar(request, (err: any, result: any) => {
+            if (err) {
+              this.logger.error(
+                `Error en ComprobantesTipoConsultar: ${err.message}`,
+              );
+              reject(
+                new BadRequestException(
+                  `Error al consultar tipos de comprobante: ${err.message}`,
+                ),
+              );
+              return;
             }
 
-            let events: Array<{ code: number; msg: string }> = [];
-            if (responseData.Events?.Evt) {
-              const evtArray = Array.isArray(responseData.Events.Evt) ? responseData.Events.Evt : [responseData.Events.Evt];
-              events = evtArray.map((e: any) => ({ code: Number(e.Code || e.code), msg: e.Msg || e.msg || '' }));
-            }
+            try {
+              const responseData =
+                result?.ComprobantesTipoConsultarResult ||
+                result?.Result ||
+                result;
+              const resultGet = responseData?.ResultGet || responseData;
 
-            this.logger.log(`Tipos de comprobante encontrados: ${tipos.length}`);
-            resolve({ tipos, errors: errors.length > 0 ? errors : undefined, events: events.length > 0 ? events : undefined });
-          } catch (parseError: any) {
-            this.logger.error(`Error al parsear tipos de comprobante: ${parseError.message}`);
-            reject(new BadRequestException(`Error al procesar tipos de comprobante: ${parseError.message}`));
-          }
-        });
-      });
+              const tiposData =
+                resultGet?.CbteTipo || resultGet?.cbteTipo || [];
+              const tiposArray = Array.isArray(tiposData)
+                ? tiposData
+                : tiposData
+                  ? [tiposData]
+                  : [];
+
+              const tipos = tiposArray.map((t: any) => ({
+                Id: Number(t.Id || t.id),
+                Desc: t.Desc || t.desc || '',
+                FchDesde: t.FchDesde || t.fchDesde || '',
+                FchHasta: t.FchHasta || t.fchHasta,
+              }));
+
+              let errors: Array<{ code: number; msg: string }> = [];
+              if (responseData.Errors?.Err) {
+                const errArray = Array.isArray(responseData.Errors.Err)
+                  ? responseData.Errors.Err
+                  : [responseData.Errors.Err];
+                errors = errArray.map((e: any) => ({
+                  code: Number(e.Code || e.code),
+                  msg: e.Msg || e.msg || '',
+                }));
+              }
+
+              let events: Array<{ code: number; msg: string }> = [];
+              if (responseData.Events?.Evt) {
+                const evtArray = Array.isArray(responseData.Events.Evt)
+                  ? responseData.Events.Evt
+                  : [responseData.Events.Evt];
+                events = evtArray.map((e: any) => ({
+                  code: Number(e.Code || e.code),
+                  msg: e.Msg || e.msg || '',
+                }));
+              }
+
+              this.logger.log(
+                `Tipos de comprobante encontrados: ${tipos.length}`,
+              );
+              resolve({
+                tipos,
+                errors: errors.length > 0 ? errors : undefined,
+                events: events.length > 0 ? events : undefined,
+              });
+            } catch (parseError: any) {
+              this.logger.error(
+                `Error al parsear tipos de comprobante: ${parseError.message}`,
+              );
+              reject(
+                new BadRequestException(
+                  `Error al procesar tipos de comprobante: ${parseError.message}`,
+                ),
+              );
+            }
+          });
+        },
+      );
     });
   }
 
@@ -2751,7 +3614,12 @@ export class AfipService implements OnModuleInit {
     clavePrivada: string,
     homologacion: boolean = false,
   ): Promise<{
-    tipos: Array<{ Id: number; Desc: string; FchDesde: string; FchHasta?: string }>;
+    tipos: Array<{
+      Id: number;
+      Desc: string;
+      FchDesde: string;
+      FchHasta?: string;
+    }>;
     errors?: Array<{ code: number; msg: string }>;
     events?: Array<{ code: number; msg: string }>;
   }> {
@@ -2759,68 +3627,118 @@ export class AfipService implements OnModuleInit {
     this.logger.log(`CUIT Emisor: ${cuitEmisor}`);
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
-    const ticket = await this.getTicket('wscdc', certificado, clavePrivada, homologacion);
-    
+    const ticket = await this.getTicket(
+      'wscdc',
+      certificado,
+      clavePrivada,
+      homologacion,
+    );
+
     const urls = this.getAfipUrls(homologacion);
     const wscdcUrl = urls.wscdc;
 
     return new Promise((resolve, reject) => {
-      soap.createClient(wscdcUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
-        if (err) {
-          this.logger.error(`Error al crear cliente SOAP WSCDC: ${err.message}`);
-          reject(new BadRequestException(`Error al crear cliente SOAP WSCDC: ${err.message}`));
-          return;
-        }
-
-        const request = {
-          auth: {
-            token: ticket.token,
-            sign: ticket.sign,
-            cuit: cuitEmisor.replace(/-/g, ''),
-          },
-        };
-
-        client.DocumentosTipoConsultar(request, (err: any, result: any) => {
+      soap.createClient(
+        wscdcUrl,
+        { wsdl_options: { timeout: 30000 } },
+        (err, client) => {
           if (err) {
-            this.logger.error(`Error en DocumentosTipoConsultar: ${err.message}`);
-            reject(new BadRequestException(`Error al consultar tipos de documento: ${err.message}`));
+            this.logger.error(
+              `Error al crear cliente SOAP WSCDC: ${err.message}`,
+            );
+            reject(
+              new BadRequestException(
+                `Error al crear cliente SOAP WSCDC: ${err.message}`,
+              ),
+            );
             return;
           }
 
-          try {
-            const responseData = result?.DocumentosTipoConsultarResult || result?.Result || result;
-            const resultGet = responseData?.ResultGet || responseData;
-            
-            const tiposData = resultGet?.DocTipo || resultGet?.docTipo || [];
-            const tiposArray = Array.isArray(tiposData) ? tiposData : (tiposData ? [tiposData] : []);
+          const request = {
+            auth: {
+              token: ticket.token,
+              sign: ticket.sign,
+              cuit: cuitEmisor.replace(/-/g, ''),
+            },
+          };
 
-            const tipos = tiposArray.map((t: any) => ({
-              Id: Number(t.Id || t.id),
-              Desc: t.Desc || t.desc || '',
-              FchDesde: t.FchDesde || t.fchDesde || '',
-              FchHasta: t.FchHasta || t.fchHasta,
-            }));
-
-            let errors: Array<{ code: number; msg: string }> = [];
-            if (responseData.Errors?.Err) {
-              const errArray = Array.isArray(responseData.Errors.Err) ? responseData.Errors.Err : [responseData.Errors.Err];
-              errors = errArray.map((e: any) => ({ code: Number(e.Code || e.code), msg: e.Msg || e.msg || '' }));
+          client.DocumentosTipoConsultar(request, (err: any, result: any) => {
+            if (err) {
+              this.logger.error(
+                `Error en DocumentosTipoConsultar: ${err.message}`,
+              );
+              reject(
+                new BadRequestException(
+                  `Error al consultar tipos de documento: ${err.message}`,
+                ),
+              );
+              return;
             }
 
-            let events: Array<{ code: number; msg: string }> = [];
-            if (responseData.Events?.Evt) {
-              const evtArray = Array.isArray(responseData.Events.Evt) ? responseData.Events.Evt : [responseData.Events.Evt];
-              events = evtArray.map((e: any) => ({ code: Number(e.Code || e.code), msg: e.Msg || e.msg || '' }));
-            }
+            try {
+              const responseData =
+                result?.DocumentosTipoConsultarResult ||
+                result?.Result ||
+                result;
+              const resultGet = responseData?.ResultGet || responseData;
 
-            this.logger.log(`Tipos de documento encontrados: ${tipos.length}`);
-            resolve({ tipos, errors: errors.length > 0 ? errors : undefined, events: events.length > 0 ? events : undefined });
-          } catch (parseError: any) {
-            this.logger.error(`Error al parsear tipos de documento: ${parseError.message}`);
-            reject(new BadRequestException(`Error al procesar tipos de documento: ${parseError.message}`));
-          }
-        });
-      });
+              const tiposData = resultGet?.DocTipo || resultGet?.docTipo || [];
+              const tiposArray = Array.isArray(tiposData)
+                ? tiposData
+                : tiposData
+                  ? [tiposData]
+                  : [];
+
+              const tipos = tiposArray.map((t: any) => ({
+                Id: Number(t.Id || t.id),
+                Desc: t.Desc || t.desc || '',
+                FchDesde: t.FchDesde || t.fchDesde || '',
+                FchHasta: t.FchHasta || t.fchHasta,
+              }));
+
+              let errors: Array<{ code: number; msg: string }> = [];
+              if (responseData.Errors?.Err) {
+                const errArray = Array.isArray(responseData.Errors.Err)
+                  ? responseData.Errors.Err
+                  : [responseData.Errors.Err];
+                errors = errArray.map((e: any) => ({
+                  code: Number(e.Code || e.code),
+                  msg: e.Msg || e.msg || '',
+                }));
+              }
+
+              let events: Array<{ code: number; msg: string }> = [];
+              if (responseData.Events?.Evt) {
+                const evtArray = Array.isArray(responseData.Events.Evt)
+                  ? responseData.Events.Evt
+                  : [responseData.Events.Evt];
+                events = evtArray.map((e: any) => ({
+                  code: Number(e.Code || e.code),
+                  msg: e.Msg || e.msg || '',
+                }));
+              }
+
+              this.logger.log(
+                `Tipos de documento encontrados: ${tipos.length}`,
+              );
+              resolve({
+                tipos,
+                errors: errors.length > 0 ? errors : undefined,
+                events: events.length > 0 ? events : undefined,
+              });
+            } catch (parseError: any) {
+              this.logger.error(
+                `Error al parsear tipos de documento: ${parseError.message}`,
+              );
+              reject(
+                new BadRequestException(
+                  `Error al procesar tipos de documento: ${parseError.message}`,
+                ),
+              );
+            }
+          });
+        },
+      );
     });
   }
 
@@ -2833,7 +3751,12 @@ export class AfipService implements OnModuleInit {
     clavePrivada: string,
     homologacion: boolean = false,
   ): Promise<{
-    tipos: Array<{ Id: string; Desc: string; FchDesde: string; FchHasta?: string }>;
+    tipos: Array<{
+      Id: string;
+      Desc: string;
+      FchDesde: string;
+      FchHasta?: string;
+    }>;
     errors?: Array<{ code: number; msg: string }>;
     events?: Array<{ code: number; msg: string }>;
   }> {
@@ -2841,68 +3764,117 @@ export class AfipService implements OnModuleInit {
     this.logger.log(`CUIT Emisor: ${cuitEmisor}`);
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
-    const ticket = await this.getTicket('wscdc', certificado, clavePrivada, homologacion);
-    
+    const ticket = await this.getTicket(
+      'wscdc',
+      certificado,
+      clavePrivada,
+      homologacion,
+    );
+
     const urls = this.getAfipUrls(homologacion);
     const wscdcUrl = urls.wscdc;
 
     return new Promise((resolve, reject) => {
-      soap.createClient(wscdcUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
-        if (err) {
-          this.logger.error(`Error al crear cliente SOAP WSCDC: ${err.message}`);
-          reject(new BadRequestException(`Error al crear cliente SOAP WSCDC: ${err.message}`));
-          return;
-        }
-
-        const request = {
-          auth: {
-            token: ticket.token,
-            sign: ticket.sign,
-            cuit: cuitEmisor.replace(/-/g, ''),
-          },
-        };
-
-        client.OpcionalesTipoConsultar(request, (err: any, result: any) => {
+      soap.createClient(
+        wscdcUrl,
+        { wsdl_options: { timeout: 30000 } },
+        (err, client) => {
           if (err) {
-            this.logger.error(`Error en OpcionalesTipoConsultar: ${err.message}`);
-            reject(new BadRequestException(`Error al consultar tipos opcionales: ${err.message}`));
+            this.logger.error(
+              `Error al crear cliente SOAP WSCDC: ${err.message}`,
+            );
+            reject(
+              new BadRequestException(
+                `Error al crear cliente SOAP WSCDC: ${err.message}`,
+              ),
+            );
             return;
           }
 
-          try {
-            const responseData = result?.OpcionalesTipoConsultarResult || result?.Result || result;
-            const resultGet = responseData?.ResultGet || responseData;
-            
-            const tiposData = resultGet?.OpcionalTipo || resultGet?.opcionalTipo || [];
-            const tiposArray = Array.isArray(tiposData) ? tiposData : (tiposData ? [tiposData] : []);
+          const request = {
+            auth: {
+              token: ticket.token,
+              sign: ticket.sign,
+              cuit: cuitEmisor.replace(/-/g, ''),
+            },
+          };
 
-            const tipos = tiposArray.map((t: any) => ({
-              Id: String(t.Id || t.id || ''),
-              Desc: t.Desc || t.desc || '',
-              FchDesde: t.FchDesde || t.fchDesde || '',
-              FchHasta: t.FchHasta || t.fchHasta,
-            }));
-
-            let errors: Array<{ code: number; msg: string }> = [];
-            if (responseData.Errors?.Err) {
-              const errArray = Array.isArray(responseData.Errors.Err) ? responseData.Errors.Err : [responseData.Errors.Err];
-              errors = errArray.map((e: any) => ({ code: Number(e.Code || e.code), msg: e.Msg || e.msg || '' }));
+          client.OpcionalesTipoConsultar(request, (err: any, result: any) => {
+            if (err) {
+              this.logger.error(
+                `Error en OpcionalesTipoConsultar: ${err.message}`,
+              );
+              reject(
+                new BadRequestException(
+                  `Error al consultar tipos opcionales: ${err.message}`,
+                ),
+              );
+              return;
             }
 
-            let events: Array<{ code: number; msg: string }> = [];
-            if (responseData.Events?.Evt) {
-              const evtArray = Array.isArray(responseData.Events.Evt) ? responseData.Events.Evt : [responseData.Events.Evt];
-              events = evtArray.map((e: any) => ({ code: Number(e.Code || e.code), msg: e.Msg || e.msg || '' }));
-            }
+            try {
+              const responseData =
+                result?.OpcionalesTipoConsultarResult ||
+                result?.Result ||
+                result;
+              const resultGet = responseData?.ResultGet || responseData;
 
-            this.logger.log(`Tipos opcionales encontrados: ${tipos.length}`);
-            resolve({ tipos, errors: errors.length > 0 ? errors : undefined, events: events.length > 0 ? events : undefined });
-          } catch (parseError: any) {
-            this.logger.error(`Error al parsear tipos opcionales: ${parseError.message}`);
-            reject(new BadRequestException(`Error al procesar tipos opcionales: ${parseError.message}`));
-          }
-        });
-      });
+              const tiposData =
+                resultGet?.OpcionalTipo || resultGet?.opcionalTipo || [];
+              const tiposArray = Array.isArray(tiposData)
+                ? tiposData
+                : tiposData
+                  ? [tiposData]
+                  : [];
+
+              const tipos = tiposArray.map((t: any) => ({
+                Id: String(t.Id || t.id || ''),
+                Desc: t.Desc || t.desc || '',
+                FchDesde: t.FchDesde || t.fchDesde || '',
+                FchHasta: t.FchHasta || t.fchHasta,
+              }));
+
+              let errors: Array<{ code: number; msg: string }> = [];
+              if (responseData.Errors?.Err) {
+                const errArray = Array.isArray(responseData.Errors.Err)
+                  ? responseData.Errors.Err
+                  : [responseData.Errors.Err];
+                errors = errArray.map((e: any) => ({
+                  code: Number(e.Code || e.code),
+                  msg: e.Msg || e.msg || '',
+                }));
+              }
+
+              let events: Array<{ code: number; msg: string }> = [];
+              if (responseData.Events?.Evt) {
+                const evtArray = Array.isArray(responseData.Events.Evt)
+                  ? responseData.Events.Evt
+                  : [responseData.Events.Evt];
+                events = evtArray.map((e: any) => ({
+                  code: Number(e.Code || e.code),
+                  msg: e.Msg || e.msg || '',
+                }));
+              }
+
+              this.logger.log(`Tipos opcionales encontrados: ${tipos.length}`);
+              resolve({
+                tipos,
+                errors: errors.length > 0 ? errors : undefined,
+                events: events.length > 0 ? events : undefined,
+              });
+            } catch (parseError: any) {
+              this.logger.error(
+                `Error al parsear tipos opcionales: ${parseError.message}`,
+              );
+              reject(
+                new BadRequestException(
+                  `Error al procesar tipos opcionales: ${parseError.message}`,
+                ),
+              );
+            }
+          });
+        },
+      );
     });
   }
 
@@ -2922,41 +3894,246 @@ export class AfipService implements OnModuleInit {
     const wscdcUrl = urls.wscdc;
 
     return new Promise((resolve, reject) => {
-      soap.createClient(wscdcUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
-        if (err) {
-          this.logger.error(`Error al crear cliente SOAP WSCDC: ${err.message}`);
-          reject(new BadRequestException(`Error al crear cliente SOAP WSCDC: ${err.message}`));
-          return;
-        }
-
-        // Dummy no requiere parámetros
-        const request = {};
-
-        client.ComprobanteDummy(request, (err: any, result: any) => {
+      soap.createClient(
+        wscdcUrl,
+        { wsdl_options: { timeout: 30000 } },
+        (err, client) => {
           if (err) {
-            this.logger.error(`Error en ComprobanteDummy: ${err.message}`);
-            reject(new BadRequestException(`Error al ejecutar dummy: ${err.message}`));
+            this.logger.error(
+              `Error al crear cliente SOAP WSCDC: ${err.message}`,
+            );
+            reject(
+              new BadRequestException(
+                `Error al crear cliente SOAP WSCDC: ${err.message}`,
+              ),
+            );
             return;
           }
 
-          try {
-            const responseData = result?.ComprobanteDummyResult || result?.Result || result;
+          // Dummy no requiere parámetros
+          const request = {};
 
-            const response = {
-              appServer: String(responseData.AppServer || responseData.appServer || ''),
-              dbServer: String(responseData.DbServer || responseData.dbServer || ''),
-              authServer: String(responseData.AuthServer || responseData.authServer || ''),
-            };
+          client.ComprobanteDummy(request, (err: any, result: any) => {
+            if (err) {
+              this.logger.error(`Error en ComprobanteDummy: ${err.message}`);
+              reject(
+                new BadRequestException(
+                  `Error al ejecutar dummy: ${err.message}`,
+                ),
+              );
+              return;
+            }
 
-            this.logger.log(`Dummy ejecutado: AppServer=${response.appServer}, DbServer=${response.dbServer}, AuthServer=${response.authServer}`);
-            resolve(response);
-          } catch (parseError: any) {
-            this.logger.error(`Error al parsear dummy: ${parseError.message}`);
-            reject(new BadRequestException(`Error al procesar dummy: ${parseError.message}`));
-          }
-        });
-      });
+            try {
+              const responseData =
+                result?.ComprobanteDummyResult || result?.Result || result;
+
+              const response = {
+                appServer: String(
+                  responseData.AppServer || responseData.appServer || '',
+                ),
+                dbServer: String(
+                  responseData.DbServer || responseData.dbServer || '',
+                ),
+                authServer: String(
+                  responseData.AuthServer || responseData.authServer || '',
+                ),
+              };
+
+              this.logger.log(
+                `Dummy ejecutado: AppServer=${response.appServer}, DbServer=${response.dbServer}, AuthServer=${response.authServer}`,
+              );
+              resolve(response);
+            } catch (parseError: any) {
+              this.logger.error(
+                `Error al parsear dummy: ${parseError.message}`,
+              );
+              reject(
+                new BadRequestException(
+                  `Error al procesar dummy: ${parseError.message}`,
+                ),
+              );
+            }
+          });
+        },
+      );
     });
   }
-}
 
+  /**
+   * WSCDC — ComprobanteConstatar COMPLETO (todos los campos obligatorios).
+   *
+   * A diferencia del `constatarComprobante` legacy (que mandaba solo ptoVta +
+   * tipo + nro), acá enviamos CbteModo, CbteFch, ImpTotal, CodAutorizacion y,
+   * condicionalmente, DocTipoReceptor/DocNroReceptor. El response lo mapeamos
+   * a `APROBADO / APROBADO_CON_OBSERVACIONES / RECHAZADO` con mensaje legible.
+   */
+  async constatarComprobanteCompleto(params: {
+    cuitAutenticador: string; // el CUIT con el que nos auth contra WSAA
+    certificado: string;
+    clavePrivada: string;
+    cbteModo: 'CAE' | 'CAI' | 'CAEA';
+    cuitEmisorComprobante: string;
+    puntoVenta: number;
+    tipoComprobante: number;
+    numeroComprobante: number;
+    fechaComprobante: string; // YYYYMMDD
+    importeTotal: number;
+    codAutorizacion: string; // 14 dígitos
+    docTipoReceptor?: string;
+    docNroReceptor?: string;
+    opcionales?: Array<{ opcionalId: string; valor: string }>;
+    homologacion?: boolean;
+  }): Promise<{
+    resultado: 'APROBADO' | 'APROBADO_CON_OBSERVACIONES' | 'RECHAZADO';
+    resultadoAfip: string;
+    fchProceso?: string;
+    observaciones: Array<{ code: number; msg: string }>;
+    errors: Array<{ code: number; msg: string }>;
+    events: Array<{ code: number; msg: string }>;
+    mensaje: string;
+  }> {
+    const homologacion = params.homologacion ?? false;
+    this.logger.log('=== WSCDC ComprobanteConstatar (completo) ===');
+    this.logger.log(
+      `cbteModo=${params.cbteModo} emisor=${params.cuitEmisorComprobante} ptoVta=${params.puntoVenta} cbteTipo=${params.tipoComprobante} cbteNro=${params.numeroComprobante} impTotal=${params.importeTotal}`,
+    );
+
+    const ticket = await this.getTicket(
+      'wscdc',
+      params.certificado,
+      params.clavePrivada,
+      homologacion,
+    );
+    const urls = this.getAfipUrls(homologacion);
+    const wscdcUrl = urls.wscdc;
+
+    const cbteReq: any = {
+      CbteModo: params.cbteModo,
+      CuitEmisor: params.cuitEmisorComprobante.replace(/-/g, ''),
+      PtoVta: params.puntoVenta,
+      CbteTipo: params.tipoComprobante,
+      CbteNro: params.numeroComprobante,
+      CbteFch: params.fechaComprobante,
+      ImpTotal: params.importeTotal,
+      CodAutorizacion: params.codAutorizacion,
+    };
+    if (params.docTipoReceptor) cbteReq.DocTipoReceptor = params.docTipoReceptor;
+    if (params.docNroReceptor) cbteReq.DocNroReceptor = params.docNroReceptor;
+    if (params.opcionales && params.opcionales.length > 0) {
+      cbteReq.Opcionales = {
+        Opcional: params.opcionales.map((o) => ({
+          OpcionalId: o.opcionalId,
+          Valor: o.valor,
+        })),
+      };
+    }
+
+    const request = {
+      Auth: {
+        Token: ticket.token,
+        Sign: ticket.sign,
+        Cuit: params.cuitAutenticador.replace(/-/g, ''),
+      },
+      CmpReq: cbteReq,
+    };
+
+    return new Promise((resolve, reject) => {
+      soap.createClient(
+        wscdcUrl,
+        { wsdl_options: { timeout: 30000 } },
+        (err, client) => {
+          if (err) {
+            return reject(
+              new BadRequestException(
+                `Error al crear cliente SOAP WSCDC: ${err.message}`,
+              ),
+            );
+          }
+
+          client.ComprobanteConstatar(request, (soapErr: any, result: any) => {
+            if (soapErr) {
+              this.logger.error(
+                `Error ComprobanteConstatar: ${soapErr.message}`,
+              );
+              return reject(
+                new BadRequestException(
+                  `WSCDC rechazó la consulta: ${soapErr.message}`,
+                ),
+              );
+            }
+
+            try {
+              const body =
+                result?.ComprobanteConstatarResult || result?.Result || result;
+              const resultadoAfip: string = body?.Resultado ?? 'R';
+              const fchProceso: string | undefined = body?.FchProceso;
+              const observaciones = this.extractWscdcList(
+                body?.Observaciones?.CodDescripcion,
+              );
+              const errors = this.extractWscdcList(body?.Errors?.Err);
+              const events = this.extractWscdcList(body?.Events?.Evt);
+
+              let resultado:
+                | 'APROBADO'
+                | 'APROBADO_CON_OBSERVACIONES'
+                | 'RECHAZADO';
+              let mensaje: string;
+
+              if (resultadoAfip === 'A') {
+                if (observaciones.length === 0) {
+                  resultado = 'APROBADO';
+                  mensaje = 'Comprobante válido y registrado';
+                } else {
+                  resultado = 'APROBADO_CON_OBSERVACIONES';
+                  mensaje = `Aprobado con observaciones: ${observaciones
+                    .map((o) => `${o.code}: ${o.msg}`)
+                    .join('; ')}`;
+                }
+              } else {
+                resultado = 'RECHAZADO';
+                const reasons = [...errors, ...observaciones];
+                mensaje =
+                  reasons.length > 0
+                    ? `Rechazado: ${reasons.map((e) => `${e.code}: ${e.msg}`).join('; ')}`
+                    : 'Rechazado por AFIP sin detalle específico';
+              }
+
+              resolve({
+                resultado,
+                resultadoAfip,
+                fchProceso,
+                observaciones,
+                errors,
+                events,
+                mensaje,
+              });
+            } catch (parseErr: any) {
+              this.logger.error(
+                `Error parseando respuesta WSCDC: ${parseErr.message}`,
+              );
+              reject(
+                new BadRequestException(
+                  `Error al procesar respuesta WSCDC: ${parseErr.message}`,
+                ),
+              );
+            }
+          });
+        },
+      );
+    });
+  }
+
+  private extractWscdcList(
+    raw: any,
+  ): Array<{ code: number; msg: string }> {
+    if (!raw) return [];
+    const arr = Array.isArray(raw) ? raw : [raw];
+    return arr
+      .filter(Boolean)
+      .map((x: any) => ({
+        code: Number(x.Code ?? x.code ?? 0),
+        msg: String(x.Msg ?? x.msg ?? ''),
+      }));
+  }
+}

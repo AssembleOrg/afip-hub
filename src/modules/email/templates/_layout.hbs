@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="color-scheme" content="light">
+  <meta name="supported-color-schemes" content="light">
+  <title>{{subject}}</title>
+  <!--[if mso]>
+  <noscript>
+    <xml>
+      <o:OfficeDocumentSettings>
+        <o:PixelsPerInch>96</o:PixelsPerInch>
+      </o:OfficeDocumentSettings>
+    </xml>
+  </noscript>
+  <![endif]-->
+</head>
+<body style="margin:0;padding:0;background:#EFECE4;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%;color:#0B0B0D;">
+  <div style="display:none;max-height:0;overflow:hidden;">{{preheader}}</div>
+  <div style="display:none;max-height:0;overflow:hidden;">&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;</div>
+
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="#EFECE4" style="background:#EFECE4;">
+    <tr>
+      <td align="center" style="padding:48px 16px;">
+
+        <!-- Email card -->
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="560" style="max-width:560px;width:100%;background:#FFFFFF;border:1px solid #E5E5E0;border-radius:12px;overflow:hidden;">
+
+          <!-- Header -->
+          <tr>
+            <td style="padding:18px 24px;border-bottom:1px solid #E5E5E0;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                <tr>
+                  <td align="left" style="vertical-align:middle;">
+                    <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+                      <td width="22" height="22" align="center" valign="middle" style="background:#0B0B0D;width:22px;height:22px;border-radius:6px;color:#FFFFFF;font-size:13px;font-weight:700;line-height:22px;text-align:center;">a</td>
+                      <td style="padding-left:8px;vertical-align:middle;">
+                        <span style="color:#0B0B0D;font-size:14px;font-weight:600;letter-spacing:-0.2px;">{{productName}}</span>
+                      </td>
+                    </tr></table>
+                  </td>
+                  <td align="right" style="vertical-align:middle;">
+                    <span style="color:#8A8A82;font-size:10px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;">{{headerTag}}</span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="padding:40px 40px 32px;">
+              {{{body}}}
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding:16px 24px;border-top:1px solid #E5E5E0;background:#F7F7F5;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                <tr>
+                  <td align="left" style="color:#8A8A82;font-size:11px;line-height:1.5;">
+                    &copy; {{year}} {{productName}}
+                  </td>
+                  <td align="right">
+                    <a href="mailto:{{supportEmail}}" style="color:{{primaryColor}};font-size:11px;font-weight:500;text-decoration:none;">{{supportEmail}}</a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+        </table>
+
+        <!-- After-card note (anti-clip + legal) -->
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="560" style="max-width:560px;width:100%;margin-top:20px;">
+          <tr>
+            <td align="center" style="color:#6E6E66;font-size:11px;line-height:1.5;padding:0 16px;">
+              Este email fue enviado porque te registraste en {{productName}}.
+            </td>
+          </tr>
+        </table>
+
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

@@ -1,0 +1,51 @@
+<div style="padding:20px;background:{{#if isCritical}}#FEE2E2{{else}}#FEF3C7{{/if}};border-left:4px solid {{#if isCritical}}#DC2626{{else}}#F59E0B{{/if}};border-radius:8px;margin:0 0 24px;">
+  <p style="margin:0;color:{{#if isCritical}}#991B1B{{else}}#78350F{{/if}};font-size:14px;font-weight:600;">
+    {{#if isCritical}}🚨 Tu certificado AFIP vence en {{daysUntilExpiry}} día{{#unless isSingular}}s{{/unless}}{{else}}⚡ Certificado AFIP próximo a vencer{{/if}}
+  </p>
+</div>
+
+<h1 style="margin:0 0 16px;color:#0F172A;font-size:28px;font-keight:700;letter-spacing:-0.02em;line-height:1.2;">
+  Renová tu certificado antes del {{notAfterFormatted}}
+</h1>
+
+<p style="margin:0 0 24px;color:#475569;font-size:16px;line-height:1.6;">
+  El certificado <strong style="color:#0F172A;">{{alias}}</strong> (CUIT <code style="background:#F1F5F9;padding:2px 6px;border-radius:4px;font-family:monospace;">{{cuit}}</code>) vence en <strong>{{daysUntilExpiry}} día{{#unless isSingular}}s{{/unless}}</strong>. Cuando venza, las facturas programadas (ScheduledTasks) que lo usen van a empezar a fallar.
+</p>
+
+<div style="padding:20px;background:#F8FAFC;border-radius:12px;margin:24px 0;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+    <tr>
+      <td style="padding:6px 0;color:#64748B;font-size:14px;">Alias:</td>
+      <td align="right" style="padding:6px 0;color:#0F172A;font-size:14px;font-weight:600;">{{alias}}</td>
+    </tr>
+    <tr>
+      <td style="padding:6px 0;color:#64748B;font-size:14px;">CUIT:</td>
+      <td align="right" style="padding:6px 0;color:#0F172A;font-size:14px;font-weight:600;">{{cuit}}</td>
+    </tr>
+    <tr>
+      <td style="padding:6px 0;color:#64748B;font-size:14px;">Vence:</td>
+      <td align="right" style="padding:6px 0;color:{{#if isCritical}}#DC2626{{else}}#0F172A{{/if}};font-size:14px;font-weight:700;">{{notAfterFormatted}} ({{daysUntilExpiry}} día{{#unless isSingular}}s{{/unless}})</td>
+    </tr>
+  </table>
+</div>
+
+<h3 style="margin:24px 0 12px;color:#0F172A;font-size:17px;font-weight:700;">Cómo renovarlo</h3>
+<ol style="margin:0 0 24px;padding-left:24px;color:#475569;font-size:15px;line-height:1.7;">
+  <li>Entrá a <a href="https://auth.afip.gob.ar" style="color:{{primaryColor}};text-decoration:none;">AFIP con Clave Fiscal</a> → Administrador de Relaciones → Computadora Fiscal</li>
+  <li>Generá un nuevo certificado (pedí CSR si hace falta, o usá el que ya tenés)</li>
+  <li>Subí el nuevo cert a <strong>{{productName}}</strong> via <code style="background:#F1F5F9;padding:2px 6px;border-radius:4px;font-family:monospace;font-size:13px;">POST /certificates</code></li>
+  <li>Actualizá tus ScheduledTasks para que usen el nuevo <code style="background:#F1F5F9;padding:2px 6px;border-radius:4px;font-family:monospace;font-size:13px;">certificateId</code></li>
+  <li>Podés eliminar el cert vencido desde <a href="{{dashboardUrl}}/certificates" style="color:{{primaryColor}};text-decoration:none;">el dashboard</a></li>
+</ol>
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0;">
+  <tr>
+    <td align="center" style="background:{{primaryColor}};border-radius:10px;">
+      <a href="{{dashboardUrl}}/certificates" style="display:inline-block;padding:14px 32px;background:{{primaryColor}};color:#FFFFFF;font-size:16px;font-weight:600;text-decoration:none;border-radius:10px;">Gestionar certificados →</a>
+    </td>
+  </tr>
+</table>
+
+<p style="margin:24px 0 0;color:#64748B;font-size:13px;line-height:1.5;">
+  Recibirás este aviso a los 60, 30, 15, 7, 3 y 1 día antes del vencimiento.
+</p>

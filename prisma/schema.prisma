@@ -1,8 +1,8 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// Prisma schema — afip-hub SaaS
+// Ver docs: https://pris.ly/d/prisma-schema
 
 generator client {
-  provider = "prisma-client"
+  provider = "prisma-client-js"
   output   = "../generated/prisma"
 }
 
@@ -10,19 +10,1034 @@ datasource db {
   provider = "postgresql"
 }
 
-enum Role {
-  ADMIN
-  SUBADMIN
+// =========================================================
+// Enums
+// =========================================================
+
+enum PlatformRole {
+  ADMIN // super-admin de la plataforma: edita planes/settings, ve todas las orgs
+  SUPPORT // lectura + soporte, no edita planes ni settings
 }
 
-model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  password  String
-  role      Role
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-  deletedAt DateTime? @map("deleted_at")
+enum PlanChannel {
+  API // acceso solo vía API key
+  WEB // acceso vía frontend (incluye API key)
+  BOTH // free plan: acceso a web + API sin distinción de canal
+}
 
+enum BillingPeriod {
+  MONTHLY
+  ANNUAL
+}
+
+enum OrgRole {
+  OWNER // dueño de la organización, único facturado
+  ADMIN // gestiona api keys y usuarios
+  MEMBER // solo consulta
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  PAUSED
+}
+
+enum UsageKind {
+  BILLABLE // cuenta para la quota de requests del plan
+  PDF // generación de PDF: cuenta como request + aplica rate-limit propio
+  TA // obtención de TA (WSAA): NO cuenta, pero tiene rate-limit anti-abuso
+  NON_BILLABLE // health/status/otros: no cuenta y no limita
+}
+
+enum PaymentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  REFUNDED
+  CANCELED
+}
+
+// =========================================================
+// Usuarios y organizaciones
+// =========================================================
+
+model User {
+  id              String        @id @default(uuid())
+  email           String        @unique
+  password        String
+  emailVerifiedAt DateTime?     @map("email_verified_at")
+  platformRole    PlatformRole? @map("platform_role")
+  organizationId  String?       @map("organization_id")
+  orgRole         OrgRole?      @map("org_role")
+  organization    Organization? @relation("OrgMembers", fields: [organizationId], references: [id], onDelete: SetNull)
+  ownedOrg        Organization? @relation("OrgOwner")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+  deletedAt       DateTime?     @map("deleted_at")
+
+  apiKeysCreated       ApiKey[]                 @relation("ApiKeyCreator")
+  adminSettingsUpdated AdminSetting[]           @relation("AdminSettingUpdater")
+  emailTokens          EmailVerificationToken[]
+  passwordTokens       PasswordResetToken[]
+  auditLogs            AuditLog[]               @relation("AuditLogActor")
+  refreshTokens        RefreshToken[]
+  knownDevices         KnownDevice[]
+
+  @@index([organizationId])
+  @@index([platformRole])
   @@map("users")
+}
+
+// =========================================================
+// RefreshToken — tokens de refresh para auth (rotation + reuse detection)
+// =========================================================
+//
+// Se guarda el hash (sha256) del token, nunca el plaintext. Cada refresh rota:
+// invalida el anterior y emite uno nuevo. Si llega un token ya rotado o
+// revocado, asumimos robo y revocamos TODO el chain vía `ancestorId`.
+
+enum RefreshTokenRevokeReason {
+  LOGOUT
+  ROTATED
+  REUSE_DETECTED
+  EXPIRED
+  SECURITY_ACTION // cambio de password, baneo, etc.
+}
+
+model RefreshToken {
+  id                String                    @id @default(uuid())
+  userId            String                    @map("user_id")
+  user              User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  hashedToken       String                    @unique @map("hashed_token") // sha256 hex
+  /**
+   * ID raíz del chain de rotación. Todos los tokens que provienen del mismo
+   * login original comparten este ancestorId. Al detectar reuse, revocamos
+   * todos los tokens con el mismo ancestorId.
+   */
+  ancestorId        String                    @map("ancestor_id")
+  /**
+   * Token que emitió éste (null si es el original del login).
+   */
+  parentTokenId     String?                   @map("parent_token_id")
+  userAgent         String?                   @map("user_agent")
+  ipCreated         String?                   @map("ip_created")
+  expiresAt         DateTime                  @map("expires_at")
+  absoluteExpiresAt DateTime                  @map("absolute_expires_at")
+  revokedAt         DateTime?                 @map("revoked_at")
+  revokedReason     RefreshTokenRevokeReason? @map("revoked_reason")
+  createdAt         DateTime                  @default(now()) @map("created_at")
+
+  @@index([userId, revokedAt])
+  @@index([ancestorId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+model Organization {
+  id                 String             @id @default(uuid())
+  name               String
+  slug               String             @unique
+  ownerUserId        String             @unique @map("owner_user_id")
+  owner              User               @relation("OrgOwner", fields: [ownerUserId], references: [id])
+  planId             String             @map("plan_id")
+  plan               Plan               @relation("OrgCurrentPlan", fields: [planId], references: [id])
+  subscriptionStatus SubscriptionStatus @default(TRIALING) @map("subscription_status")
+  mpPreapprovalId    String?            @unique @map("mp_preapproval_id")
+  currentPeriodStart DateTime           @map("current_period_start")
+  currentPeriodEnd   DateTime           @map("current_period_end")
+  suspendedAt        DateTime?          @map("suspended_at")
+  suspendedReason    String?            @map("suspended_reason")
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+  deletedAt          DateTime?          @map("deleted_at")
+
+  members              User[]                 @relation("OrgMembers")
+  apiKeys              ApiKey[]
+  usageEvents          UsageEvent[]
+  usageCounters        UsageCounter[]
+  subscriptions        Subscription[]
+  addonSubscriptions   OrgAddOnSubscription[]
+  invoices             Invoice[]
+  emisores             Emisor[]
+  idempotencyKeys      IdempotencyKey[]
+  auditLogs            AuditLog[]
+  certificates         Certificate[]
+  scheduledTasks       ScheduledTask[]
+  webhookSubscriptions WebhookSubscription[]
+
+  @@index([planId])
+  @@index([subscriptionStatus])
+  @@map("organizations")
+}
+
+// =========================================================
+// Planes y billing
+// =========================================================
+
+model Plan {
+  id                 String      @id @default(uuid())
+  slug               String      @unique
+  name               String
+  description        String?
+  channel            PlanChannel @default(API) @map("channel")
+  priceUsd           Decimal     @default(0) @map("price_usd") @db.Decimal(10, 2)
+  annualPriceUsd     Decimal     @default(0) @map("annual_price_usd") @db.Decimal(10, 2) // priceUsd × 10
+  requestsLimit      Int         @map("requests_limit")
+  pdfLimit           Int         @default(20) @map("pdf_limit") // PDFs generables por mes
+  cuitLimit          Int         @default(2) @map("cuit_limit")
+  pdfRateLimitPerMin Int         @default(60) @map("pdf_rate_limit_per_min")
+  taRateLimitPerMin  Int         @default(10) @map("ta_rate_limit_per_min")
+  graceFactor        Decimal     @default(1.000) @map("grace_factor") @db.Decimal(4, 3) // 1.02 = 2% grace
+  features           Json        @default("{}")
+  isActive           Boolean     @default(true) @map("is_active")
+  isDefault          Boolean     @default(false) @map("is_default")
+  isPublic           Boolean     @default(true) @map("is_public")
+  isCustom           Boolean     @default(false) @map("is_custom")
+  displayOrder       Int         @default(0) @map("display_order")
+  createdAt          DateTime    @default(now()) @map("created_at")
+  updatedAt          DateTime    @updatedAt @map("updated_at")
+
+  currentForOrgs Organization[] @relation("OrgCurrentPlan")
+  subscriptions  Subscription[]
+
+  @@index([isActive, isPublic])
+  @@map("plans")
+}
+
+model Subscription {
+  id               String             @id @default(uuid())
+  organizationId   String             @map("organization_id")
+  organization     Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  planId           String             @map("plan_id")
+  plan             Plan               @relation(fields: [planId], references: [id])
+  mpPreapprovalId  String?            @unique @map("mp_preapproval_id")
+  status           SubscriptionStatus
+  billingPeriod    BillingPeriod      @default(MONTHLY) @map("billing_period")
+  startedAt        DateTime           @map("started_at")
+  endedAt          DateTime?          @map("ended_at")
+  lastAmountArs    Decimal?           @map("last_amount_ars") @db.Decimal(14, 2)
+  lastAmountUsd    Decimal?           @map("last_amount_usd") @db.Decimal(10, 2)
+  lastExchangeRate Decimal?           @map("last_exchange_rate") @db.Decimal(12, 4)
+  raw              Json? // snapshot MP completo
+  createdAt        DateTime           @default(now()) @map("created_at")
+  updatedAt        DateTime           @updatedAt @map("updated_at")
+
+  payments Payment[]
+
+  @@index([organizationId])
+  @@index([status])
+  @@map("subscriptions")
+}
+
+model Payment {
+  id             String        @id @default(uuid())
+  subscriptionId String        @map("subscription_id")
+  subscription   Subscription  @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  mpPaymentId    String?       @unique @map("mp_payment_id")
+  amountArs      Decimal       @map("amount_ars") @db.Decimal(14, 2)
+  amountUsd      Decimal       @map("amount_usd") @db.Decimal(10, 2)
+  exchangeRate   Decimal       @map("exchange_rate") @db.Decimal(12, 4)
+  status         PaymentStatus
+  periodStart    DateTime      @map("period_start")
+  periodEnd      DateTime      @map("period_end")
+  paidAt         DateTime?     @map("paid_at")
+  failureReason  String?       @map("failure_reason")
+  raw            Json?
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+
+  platformInvoice PlatformInvoice?
+
+  @@index([subscriptionId, createdAt])
+  @@index([status])
+  @@map("payments")
+}
+
+// =========================================================
+// AddOns — extras contratables independientes del plan (catálogo)
+// =========================================================
+//
+// Cada AddOn tiene su propio precio y su propia suscripción MP (preapproval).
+// Se contrata/cancela por separado del plan principal. Ej: bot WhatsApp,
+// integración externa, soporte premium.
+
+model AddOn {
+  id             String      @id @default(uuid())
+  slug           String      @unique
+  name           String
+  description    String?
+  channel        PlanChannel @default(BOTH) @map("channel")
+  priceUsd       Decimal     @default(0) @map("price_usd") @db.Decimal(10, 2)
+  annualPriceUsd Decimal     @default(0) @map("annual_price_usd") @db.Decimal(10, 2)
+  features       Json        @default("{}")
+  // Si true: permite prorrateo al contratar mid-cycle (cobra fracción del mes
+  // actual, cicla desde el próximo). Si false: cobra precio completo sin
+  // importar cuándo se contrate (anti-abuso para addons con cuota mensual).
+  allowProration Boolean     @default(true) @map("allow_proration")
+  isActive       Boolean     @default(true) @map("is_active")
+  isPublic       Boolean     @default(true) @map("is_public")
+  displayOrder   Int         @default(0) @map("display_order")
+  createdAt      DateTime    @default(now()) @map("created_at")
+  updatedAt      DateTime    @updatedAt @map("updated_at")
+
+  subscriptions OrgAddOnSubscription[]
+
+  @@index([isActive, isPublic])
+  @@map("addons")
+}
+
+// =========================================================
+// OrgAddOnSubscription — suscripción de una org a un AddOn
+// =========================================================
+
+model OrgAddOnSubscription {
+  id               String             @id @default(uuid())
+  organizationId   String             @map("organization_id")
+  organization     Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  addonId          String             @map("addon_id")
+  addon            AddOn              @relation(fields: [addonId], references: [id])
+  mpPreapprovalId  String?            @unique @map("mp_preapproval_id")
+  status           SubscriptionStatus
+  billingPeriod    BillingPeriod      @default(MONTHLY) @map("billing_period")
+  startedAt        DateTime           @map("started_at")
+  endedAt          DateTime?          @map("ended_at")
+  lastAmountArs    Decimal?           @map("last_amount_ars") @db.Decimal(14, 2)
+  lastAmountUsd    Decimal?           @map("last_amount_usd") @db.Decimal(10, 2)
+  lastExchangeRate Decimal?           @map("last_exchange_rate") @db.Decimal(12, 4)
+  raw              Json?
+  createdAt        DateTime           @default(now()) @map("created_at")
+  updatedAt        DateTime           @updatedAt @map("updated_at")
+
+  payments AddOnPayment[]
+
+  @@unique([organizationId, addonId])
+  @@index([organizationId])
+  @@index([status])
+  @@map("org_addon_subscriptions")
+}
+
+// =========================================================
+// AddOnPayment — mismos semantics que Payment pero para addons
+// =========================================================
+
+model AddOnPayment {
+  id             String               @id @default(uuid())
+  subscriptionId String               @map("subscription_id")
+  subscription   OrgAddOnSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  mpPaymentId    String?              @unique @map("mp_payment_id")
+  amountArs      Decimal              @map("amount_ars") @db.Decimal(14, 2)
+  amountUsd      Decimal              @map("amount_usd") @db.Decimal(10, 2)
+  exchangeRate   Decimal              @map("exchange_rate") @db.Decimal(12, 4)
+  status         PaymentStatus
+  periodStart    DateTime             @map("period_start")
+  periodEnd      DateTime             @map("period_end")
+  paidAt         DateTime?            @map("paid_at")
+  failureReason  String?              @map("failure_reason")
+  raw            Json?
+  createdAt      DateTime             @default(now()) @map("created_at")
+  updatedAt      DateTime             @updatedAt @map("updated_at")
+
+  @@index([subscriptionId, createdAt])
+  @@index([status])
+  @@map("addon_payments")
+}
+
+// =========================================================
+// PlatformInvoice — facturas que EMITIMOS a nuestros suscriptores
+// =========================================================
+//
+// Cuando un Payment pasa a APPROVED, emitimos automáticamente una factura
+// AFIP al cliente (self-billing). Usamos nuestro propio CUIT + cert guardado
+// en el storage cifrado de certificados (ver admin_settings: platform_billing.*).
+//
+// Si el cliente no tiene CUIT válido → emitimos Factura B/C a consumidor final.
+// Si lo tiene (resp. inscripto) → Factura A.
+//
+// El retry cron procesa las PENDING/FAILED con backoff.
+
+enum PlatformInvoiceStatus {
+  PENDING // aún no intentamos emitir
+  EMITTED // CAE obtenido OK
+  FAILED // último intento falló, se reintentará
+  SKIPPED // config incompleta o payment sin cliente válido → manual
+  ABANDONED // demasiados intentos fallidos, requiere intervención manual
+}
+
+model PlatformInvoice {
+  id        String  @id @default(uuid())
+  paymentId String  @unique @map("payment_id")
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  status        PlatformInvoiceStatus @default(PENDING)
+  attempts      Int                   @default(0)
+  lastAttemptAt DateTime?             @map("last_attempt_at")
+  error         String?
+
+  // Datos de la factura emitida (cuando status=EMITTED)
+  cae               String?
+  caeVencimiento    DateTime? @map("cae_vencimiento") @db.Date
+  puntoVenta        Int?      @map("punto_venta")
+  tipoComprobante   Int?      @map("tipo_comprobante")
+  numeroComprobante BigInt?   @map("numero_comprobante")
+  fechaComprobante  DateTime? @map("fecha_comprobante") @db.Date
+
+  // Snapshot del emisor+receptor al momento de emitir
+  cuitEmisor   String? @map("cuit_emisor")
+  cuitReceptor String? @map("cuit_receptor")
+  homologacion Boolean @default(false)
+
+  emittedAt DateTime? @map("emitted_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  @@index([status, lastAttemptAt])
+  @@map("platform_invoices")
+}
+
+// =========================================================
+// Auth y tenancy
+// =========================================================
+
+model ApiKey {
+  id              String       @id @default(uuid())
+  organizationId  String       @map("organization_id")
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name            String
+  prefix          String // primeros 12 chars visibles: "ah_live_abcd"
+  hashedKey       String       @unique @map("hashed_key")
+  lastUsedAt      DateTime?    @map("last_used_at")
+  lastUsedIp      String?      @map("last_used_ip")
+  expiresAt       DateTime?    @map("expires_at")
+  revokedAt       DateTime?    @map("revoked_at")
+  createdByUserId String?      @map("created_by_user_id")
+  createdBy       User?        @relation("ApiKeyCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+
+  usageEvents UsageEvent[]
+
+  @@index([organizationId])
+  @@index([hashedKey])
+  @@index([revokedAt])
+  @@map("api_keys")
+}
+
+// =========================================================
+// Uso y contadores
+// =========================================================
+
+model UsageEvent {
+  id             String       @id @default(uuid())
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  apiKeyId       String?      @map("api_key_id")
+  apiKey         ApiKey?      @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
+  endpoint       String
+  method         String
+  kind           UsageKind    @default(BILLABLE)
+  cost           Int          @default(1)
+  statusCode     Int          @map("status_code")
+  durationMs     Int          @map("duration_ms")
+  ip             String?
+  userAgent      String?      @map("user_agent")
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, kind, createdAt])
+  @@index([apiKeyId, createdAt])
+  @@index([createdAt])
+  @@map("usage_events")
+}
+
+// Agregado por período (reset mensual). Actualizado por el reconciliador.
+model UsageCounter {
+  id             String       @id @default(uuid())
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  periodStart    DateTime     @map("period_start")
+  periodEnd      DateTime     @map("period_end")
+  billableCount  Int          @default(0) @map("billable_count")
+  pdfCount       Int          @default(0) @map("pdf_count")
+  taCount        Int          @default(0) @map("ta_count")
+  lastUpdatedAt  DateTime     @default(now()) @map("last_updated_at")
+
+  @@unique([organizationId, periodStart])
+  @@index([organizationId])
+  @@map("usage_counters")
+}
+
+// =========================================================
+// Integraciones externas
+// =========================================================
+
+model ExchangeRate {
+  id        String   @id @default(uuid())
+  source    String // "dolarapi_blue"
+  buy       Decimal  @db.Decimal(12, 4)
+  sell      Decimal  @db.Decimal(12, 4)
+  fetchedAt DateTime @default(now()) @map("fetched_at")
+  raw       Json?
+
+  @@index([source, fetchedAt])
+  @@map("exchange_rates")
+}
+
+// =========================================================
+// Configuración editable por admin
+// =========================================================
+
+model AdminSetting {
+  key             String   @id
+  value           Json
+  description     String?
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  updatedByUserId String?  @map("updated_by_user_id")
+  updatedBy       User?    @relation("AdminSettingUpdater", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@map("admin_settings")
+}
+
+// =========================================================
+// Historial de comprobantes emitidos (snapshot local de lo que AFIP autorizó)
+// =========================================================
+//
+// Se guarda un registro por cada invoice que AFIP autoriza (estado "A"). Sirve
+// para auditoría, búsqueda por cliente/CUIT/período, idempotencia por
+// (cuit_emisor, pto_vta, tipo, nro) e informar consumo de CUITs distintos
+// del plan (cuitLimit).
+
+model Invoice {
+  id             String       @id @default(uuid())
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  apiKeyId       String?      @map("api_key_id")
+
+  cuitEmisor        String   @map("cuit_emisor")
+  puntoVenta        Int      @map("punto_venta")
+  tipoComprobante   Int      @map("tipo_comprobante")
+  numeroComprobante BigInt   @map("numero_comprobante")
+  fechaComprobante  DateTime @map("fecha_comprobante") @db.Date
+
+  cae            String
+  caeVencimiento DateTime @map("cae_vencimiento") @db.Date
+
+  receptorTipoDoc      Int?    @map("receptor_tipo_doc")
+  receptorNroDoc       String? @map("receptor_nro_doc")
+  receptorNombre       String? @map("receptor_nombre")
+  condicionIvaReceptor Int?    @map("condicion_iva_receptor")
+
+  moneda          String  @default("PES")
+  cotizacion      Decimal @default(1) @db.Decimal(14, 6)
+  importeNeto     Decimal @map("importe_neto") @db.Decimal(14, 2)
+  importeIva      Decimal @map("importe_iva") @db.Decimal(14, 2)
+  importeTributos Decimal @default(0) @map("importe_tributos") @db.Decimal(14, 2)
+  importeTotal    Decimal @map("importe_total") @db.Decimal(14, 2)
+
+  homologacion Boolean @default(false)
+  rawRequest   Json?   @map("raw_request")
+  rawResponse  Json?   @map("raw_response")
+
+  // Self-relation: si este comprobante es una NC/ND, apunta a la factura
+  // original que anula/ajusta. Una factura puede tener varias NC asociadas.
+  relatedToInvoiceId String?   @map("related_to_invoice_id")
+  relatedToInvoice   Invoice?  @relation("InvoiceRelations", fields: [relatedToInvoiceId], references: [id], onDelete: SetNull)
+  relatedDocuments   Invoice[] @relation("InvoiceRelations")
+
+  // Archival: cuando el retention cron supera los 180 días, sube el JSON
+  // crudo a DO Spaces y setea `archiveKey` (path en el bucket) + `archivedAt`.
+  // Después nullifica rawRequest/rawResponse para liberar espacio en Postgres.
+  // El resto de campos (CAE, importe, nros) quedan intactos para búsqueda.
+  archivedAt DateTime? @map("archived_at")
+  archiveKey String?   @map("archive_key")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([cuitEmisor, puntoVenta, tipoComprobante, numeroComprobante, homologacion], name: "invoice_uniq_emisor_nro")
+  @@index([organizationId, createdAt])
+  @@index([organizationId, cuitEmisor])
+  @@index([organizationId, fechaComprobante])
+  @@index([relatedToInvoiceId])
+  @@index([archivedAt])
+  @@map("invoices")
+}
+
+// =========================================================
+// Emisores — CUITs desde los que la org puede facturar
+// =========================================================
+//
+// El usuario registra explícitamente cada emisor (CUIT propio o representado
+// en ARCA). El slot se consume con `plan.cuitLimit`. La validación contra AFIP
+// (FEParamGetPtosVenta con cuitRepresentada) confirma que el cert tiene
+// permiso real antes de guardar. Soft-delete con retención de 28 días: el
+// slot sigue ocupado aunque borres, para prevenir el ciclo create/delete.
+
+enum EmisorValidationStatus {
+  PENDING // esperando validación contra AFIP
+  VALIDATED // AFIP confirmó permiso
+  FAILED // AFIP rechazó (no tiene permiso, o cert inválido)
+}
+
+enum EmisorCertMode {
+  ACCOUNT  // usa un Certificate de la cuenta (certificateId vinculado); cubre cert propio y delegación del agente
+  PLATFORM // usa el cert maestro del SaaS (env MASTER_PADRON_*); el emisor delegó al CUIT de la plataforma
+}
+
+model Emisor {
+  id             String       @id @default(uuid())
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  cuit        String // 11 dígitos, sin guiones
+  razonSocial String? @map("razon_social")
+  alias       String? // nombre amigable que el user le pone
+  condicionIva String?         @map("condicion_iva") // condición IVA del contribuyente (pre-cargado desde padrón)
+  puntoVenta   Int?            @map("punto_venta")   // punto de venta principal
+  certMode     EmisorCertMode  @default(ACCOUNT) @map("cert_mode") // modo de autenticación
+
+  // Certificado con el que se valida (y se factura)
+  certificateId String?      @map("certificate_id")
+  certificate   Certificate? @relation(fields: [certificateId], references: [id], onDelete: SetNull)
+
+  // Resultado de la validación AFIP
+  validationStatus    EmisorValidationStatus @default(PENDING) @map("validation_status")
+  validatedAt         DateTime?              @map("validated_at")
+  validationError     String?                @map("validation_error")
+  validationErrorCode String?                @map("validation_error_code")
+
+  firstSeenAt  DateTime @default(now()) @map("first_seen_at")
+  lastSeenAt   DateTime @default(now()) @map("last_seen_at")
+  requestCount Int      @default(0) @map("request_count")
+
+  createdByUserId String?   @map("created_by_user_id")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  deletedAt       DateTime? @map("deleted_at")
+
+  ventanillaMessages AfipVentanillaMessage[]
+
+  @@unique([organizationId, cuit])
+  @@index([organizationId, deletedAt])
+  @@index([certificateId])
+  @@map("emisores")
+}
+
+// =========================================================
+// Ventanilla Electrónica — mensajes AFIP persistidos por cron
+// =========================================================
+//
+// Cada 4h el cron recorre los Emisores validados, llama a AFIP VE
+// (consultarComunicaciones) y persiste las nuevas notificaciones.
+// Dedupe por `(emisorId, afipMessageId)`. El `body` se trae on-demand cuando
+// el user lo abre (llamando a consumirComunicacion) para ahorrar storage.
+
+model AfipVentanillaMessage {
+  id             String @id @default(uuid())
+  organizationId String @map("organization_id")
+  emisorId       String @map("emisor_id")
+  emisor         Emisor @relation(fields: [emisorId], references: [id], onDelete: Cascade)
+
+  afipMessageId         BigInt    @map("afip_message_id") // id de AFIP (idComunicacion)
+  sistemaPublicador     Int?      @map("sistema_publicador")
+  sistemaPublicadorDesc String?   @map("sistema_publicador_desc")
+  asunto                String
+  fechaPublicacion      DateTime  @map("fecha_publicacion")
+  fechaVencimiento      DateTime? @map("fecha_vencimiento")
+  prioridad             Int?
+  tieneAdjunto          Boolean   @default(false) @map("tiene_adjunto")
+  estadoAfip            Int       @map("estado_afip") // 1=no leída en AFIP, 2=leída
+
+  // Body / cuerpo se hidrata on-demand cuando el user lo abre
+  body          String?   @db.Text
+  bodyFetchedAt DateTime? @map("body_fetched_at")
+
+  // Estado local (puede diferir del de AFIP si el user marcó como leído acá)
+  readAt       DateTime? @map("read_at")
+  readByUserId String?   @map("read_by_user_id")
+
+  fetchedAt DateTime @default(now()) @map("fetched_at")
+  raw       Json?
+
+  @@unique([emisorId, afipMessageId])
+  @@index([organizationId, readAt])
+  @@index([organizationId, fechaPublicacion])
+  @@index([emisorId, fechaPublicacion])
+  @@map("afip_ventanilla_messages")
+}
+
+// =========================================================
+// Idempotency keys
+// =========================================================
+//
+// Cuando el cliente envía `Idempotency-Key` en el header, cacheamos la
+// respuesta exitosa por 24h. Si reintenta con la misma key + mismo body,
+// devolvemos la respuesta cacheada (NO re-emite factura). Si reintenta con
+// la misma key + body distinto, error 409.
+
+model IdempotencyKey {
+  id             String       @id @default(uuid())
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  key            String // header value
+  endpoint       String
+  method         String
+  bodyHash       String       @map("body_hash") // sha256 del body
+  statusCode     Int          @map("status_code")
+  responseBody   Json         @map("response_body")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  expiresAt      DateTime     @map("expires_at")
+
+  @@unique([organizationId, key])
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}
+
+// =========================================================
+// Email verification + password reset
+// =========================================================
+
+model EmailVerificationToken {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique @map("token_hash") // sha256 del token, nunca el plaintext
+  email     String // a verificar (snapshot por si user cambia email)
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("email_verification_tokens")
+}
+
+model PasswordResetToken {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash   String    @unique @map("token_hash")
+  expiresAt   DateTime  @map("expires_at")
+  usedAt      DateTime? @map("used_at")
+  ipRequested String?   @map("ip_requested")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
+}
+
+// =========================================================
+// Audit Log
+// =========================================================
+//
+// Registro append-only de **acciones sensibles** ejecutadas por usuarios o API
+// keys. NO se audita cada factura emitida (eso está en UsageEvent). Acá van:
+//  - Auth (login, failed_login, password_reset, email_verified)
+//  - API keys (created, revoked)
+//  - Organización (plan_changed, suspended, reactivated, member_added)
+//  - CUITs (cuit_added, cuit_removed)
+//  - Billing (subscription_created, subscription_canceled, payment_failed)
+//  - Admin de plataforma (plan_updated, setting_updated, org_suspended)
+//
+// Filtrable por: actor (user/apiKey), action, targetType+targetId, date range,
+// organizationId. Retención: 13 meses (cron de purge). Nunca borramos en línea.
+
+enum AuditActor {
+  USER // hizo login, acción en el dashboard
+  API_KEY // acción programática
+  SYSTEM // cron, webhook, auto-recalc billing
+  PLATFORM_ADMIN // admin/support de la plataforma
+}
+
+model AuditLog {
+  id String @id @default(uuid())
+
+  // Actor (quién disparó la acción)
+  actorType     AuditActor @map("actor_type")
+  actorUserId   String?    @map("actor_user_id")
+  actorUser     User?      @relation("AuditLogActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  actorApiKeyId String?    @map("actor_api_key_id")
+  actorLabel    String?    @map("actor_label") // snapshot: email o key-prefix al momento del evento
+
+  // Contexto (de qué org viene, por si el actor es platform o la org fue borrada)
+  organizationId String?       @map("organization_id")
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  // Acción (qué pasó)
+  action     String // "auth.login", "api_key.created", "org.plan_changed", etc.
+  result     String // "ok" | "fail"
+  severity   String  @default("info") // info | warn | error
+  targetType String? @map("target_type") // "user" | "organization" | "api_key" | "plan" | ...
+  targetId   String? @map("target_id")
+
+  // Payload
+  metadata Json?
+  changes  Json? // diff antes/después para updates
+
+  // Request context (si aplica)
+  ip        String?
+  userAgent String? @map("user_agent")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([organizationId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([action, createdAt])
+  @@index([targetType, targetId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// =========================================================
+// Certificados AFIP (guardados encriptados en la misma DB)
+// =========================================================
+//
+// El material sensible se persiste cifrado con AES-256-GCM usando una clave
+// maestra fuera de la base (`CERT_MASTER_KEY`). La DB jamás guarda el cert/key
+// en plaintext. Metadata útil (CUIT extraído, fingerprint, vencimiento) sí se
+// guarda para búsqueda y alertas de expiración.
+//
+// El opt-in es solo para quien quiera usar `ScheduledTask` (donde el cert
+// debe estar disponible sin el user presente). El flujo default sigue siendo
+// stateless (cert por request).
+
+model Certificate {
+  id             String       @id @default(uuid())
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  alias                String // nombre que el user le pone (ej: "Producción CUIT 20-...")
+  cuit                 String // extraído del subject del cert
+  fingerprint          String // sha256 del cert PEM (dedup + auditoría)
+  vaultPath            String   @map("vault_path") // legacy: compatibilidad con registros viejos
+  encryptedPayload     String?  @map("encrypted_payload") // cert+key cifrados en base64
+  encryptionIv         String?  @map("encryption_iv") // IV AES-GCM (base64)
+  encryptionTag        String?  @map("encryption_tag") // auth tag AES-GCM (base64)
+  encryptionKeyVersion Int      @default(1) @map("encryption_key_version")
+  notBefore            DateTime @map("not_before")
+  notAfter             DateTime @map("not_after") // para alertas de expiración
+
+  isActive         Boolean   @default(true) @map("is_active")
+  lastUsedAt       DateTime? @map("last_used_at")
+  lastUsedByTaskId String?   @map("last_used_by_task_id")
+
+  createdByUserId String?   @map("created_by_user_id")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  deletedAt       DateTime? @map("deleted_at")
+
+  scheduledTasks ScheduledTask[]
+  emisores       Emisor[]
+
+  @@unique([organizationId, fingerprint])
+  @@index([organizationId, isActive])
+  @@index([notAfter]) // para cron de alertas de expiración
+  @@map("certificates")
+}
+
+// =========================================================
+// Scheduled Tasks (crons programables por el usuario)
+// =========================================================
+
+enum ScheduledTaskType {
+  INVOICE // emitir factura (create-invoice payload)
+  CONSULTAR_CUIT // consultar contribuyente en padrón
+  ULTIMO_AUTORIZADO // consultar último nro autorizado
+}
+
+enum ScheduledTaskRunStatus {
+  RUNNING
+  OK
+  FAILED
+  SKIPPED // la task estaba inactiva / org suspendida al momento de ejecutar
+}
+
+model ScheduledTask {
+  id             String       @id @default(uuid())
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  certificateId  String       @map("certificate_id") // cert persistido obligatorio
+  certificate    Certificate  @relation(fields: [certificateId], references: [id], onDelete: Restrict)
+
+  name        String
+  description String?
+  type        ScheduledTaskType
+
+  // Schedule
+  cronExpression String    @map("cron_expression") // "30 9 * * 1-5"
+  timezone       String    @default("America/Argentina/Buenos_Aires")
+  runOnce        DateTime? @map("run_once") // si está seteado, corre 1 sola vez a esta fecha
+
+  // Payload: body del request que va a ejecutarse (sin cert/key — los pone el worker desde el storage cifrado)
+  payload Json
+
+  // Estado
+  isActive            Boolean                 @default(true) @map("is_active")
+  lastRunAt           DateTime?               @map("last_run_at")
+  lastRunStatus       ScheduledTaskRunStatus? @map("last_run_status")
+  nextRunAt           DateTime?               @map("next_run_at")
+  consecutiveFailures Int                     @default(0) @map("consecutive_failures")
+
+  createdByUserId String?   @map("created_by_user_id")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  deletedAt       DateTime? @map("deleted_at")
+
+  runs ScheduledTaskRun[]
+
+  @@index([organizationId, isActive])
+  @@index([nextRunAt, isActive])
+  @@index([certificateId])
+  @@map("scheduled_tasks")
+}
+
+model ScheduledTaskRun {
+  id         String                 @id @default(uuid())
+  taskId     String                 @map("task_id")
+  task       ScheduledTask          @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  startedAt  DateTime               @map("started_at")
+  endedAt    DateTime?              @map("ended_at")
+  status     ScheduledTaskRunStatus
+  result     Json? // respuesta del endpoint ejecutado (CAE, etc.)
+  error      String? // mensaje de error si FAILED
+  durationMs Int?                   @map("duration_ms")
+
+  @@index([taskId, startedAt])
+  @@index([status, startedAt])
+  @@map("scheduled_task_runs")
+}
+
+// =========================================================
+// Notification Deliveries (idempotencia de emails de sistema)
+// =========================================================
+//
+// Evita spam y duplicados. Reglas:
+//  - `QUOTA_WARNING_80` y `QUOTA_EXHAUSTED_100` se mandan 1 vez por org por
+//    período (dedupeKey = "kind:orgId:periodStart").
+//  - `PAYMENT_FAILED` / `PAYMENT_APPROVED` se mandan 1 vez por Payment.id.
+//  - `BLUE_JUMPED` se manda 1 vez por ciclo de billing.
+//  - `VERIFY_EMAIL`, `PASSWORD_RESET`, `SUBSCRIPTION_ACTIVATED`,
+//    `SUBSCRIPTION_CANCELED` se envían on-event sin dedupe.
+
+enum NotificationKind {
+  VERIFY_EMAIL
+  PASSWORD_RESET
+  QUOTA_WARNING_80
+  QUOTA_EXHAUSTED_100
+  PAYMENT_FAILED
+  PAYMENT_APPROVED
+  SUBSCRIPTION_ACTIVATED
+  SUBSCRIPTION_CANCELED
+  BLUE_JUMPED
+  CERTIFICATE_EXPIRING
+  STORAGE_WARNING
+  NEW_DEVICE
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+model NotificationDelivery {
+  id             String             @id @default(uuid())
+  organizationId String?            @map("organization_id")
+  userId         String?            @map("user_id")
+  kind           NotificationKind
+  dedupeKey      String?            @unique @map("dedupe_key")
+  toEmail        String             @map("to_email")
+  subject        String
+  templateName   String             @map("template_name")
+  status         NotificationStatus @default(PENDING)
+  error          String?
+  sentAt         DateTime?          @map("sent_at")
+  createdAt      DateTime           @default(now()) @map("created_at")
+
+  @@index([organizationId, createdAt])
+  @@index([kind, createdAt])
+  @@map("notification_deliveries")
+}
+
+// =========================================================
+// Outbound Webhooks (eventos firmados HMAC hacia URLs del cliente)
+// =========================================================
+//
+// El cliente registra una URL y la lista de eventos que quiere recibir.
+// Cuando pasa uno, enviamos POST con firma HMAC-SHA256 en header
+// `X-Webhook-Signature: sha256=<hex>` calculado sobre el body crudo.
+// Retries con backoff exponencial hasta éxito o agotar intentos.
+
+enum WebhookDeliveryStatus {
+  PENDING
+  IN_FLIGHT
+  DELIVERED
+  FAILED
+}
+
+model WebhookSubscription {
+  id                  String       @id @default(uuid())
+  organizationId      String       @map("organization_id")
+  organization        Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  url                 String
+  events              String[] // ej ["invoice.emitted", "payment.approved", "quota.warning_80"]
+  description         String?
+  secretHash          String       @map("secret_hash") // sha256 del secret; el plaintext solo se muestra en creación
+  isActive            Boolean      @default(true) @map("is_active")
+  lastSuccessAt       DateTime?    @map("last_success_at")
+  consecutiveFailures Int          @default(0) @map("consecutive_failures")
+  createdByUserId     String?      @map("created_by_user_id")
+  createdAt           DateTime     @default(now()) @map("created_at")
+  updatedAt           DateTime     @updatedAt @map("updated_at")
+  deletedAt           DateTime?    @map("deleted_at")
+
+  deliveries WebhookDelivery[]
+
+  @@index([organizationId, isActive])
+  @@map("webhook_subscriptions")
+}
+
+// =========================================================
+// Known Devices — dispositivos reconocidos por fingerprint
+// =========================================================
+//
+// Al hacer login, el frontend envía un `fingerprint` generado por FingerprintJS
+// (visitorId). Si no existe en esta tabla para el user → nuevo dispositivo →
+// mandamos email de alerta (excepto en el primer login de la cuenta).
+
+model KnownDevice {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fingerprintHash String   @map("fingerprint_hash") // sha256 del visitorId de FingerprintJS
+  label           String?  // "Chrome en macOS", parseado del userAgent
+  lastIp          String?  @map("last_ip")
+  firstSeenAt     DateTime @default(now()) @map("first_seen_at")
+  lastSeenAt      DateTime @default(now()) @map("last_seen_at")
+
+  @@unique([userId, fingerprintHash])
+  @@index([userId])
+  @@map("known_devices")
+}
+
+model WebhookDelivery {
+  id             String                @id @default(uuid())
+  subscriptionId String                @map("subscription_id")
+  subscription   WebhookSubscription   @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  eventType      String                @map("event_type")
+  eventId        String                @map("event_id") // uuid único del evento (idempotencia en el receiver)
+  payload        Json
+  status         WebhookDeliveryStatus @default(PENDING)
+  attempts       Int                   @default(0)
+  nextAttemptAt  DateTime              @map("next_attempt_at")
+  lastAttemptAt  DateTime?             @map("last_attempt_at")
+  lastStatusCode Int?                  @map("last_status_code")
+  lastError      String?               @map("last_error")
+  deliveredAt    DateTime?             @map("delivered_at")
+  createdAt      DateTime              @default(now()) @map("created_at")
+
+  @@index([status, nextAttemptAt])
+  @@index([subscriptionId, createdAt])
+  @@map("webhook_deliveries")
 }

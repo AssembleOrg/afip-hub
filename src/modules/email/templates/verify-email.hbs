@@ -1,0 +1,85 @@
+<h1 style="margin:0 0 20px;color:#0B0B0D;font-size:28px;font-weight:600;letter-spacing:-0.8px;line-height:1.2;">
+  Verificá tu email
+</h1>
+
+<p style="margin:0 0 14px;color:#0B0B0D;font-size:15px;font-weight:500;line-height:1.4;">
+  Hola{{#if userName}} {{userName}}{{/if}},
+</p>
+
+<p style="margin:0 0 28px;color:#55554E;font-size:14px;line-height:1.55;">
+  Gracias por crear una cuenta en <strong style="color:#0B0B0D;font-weight:600;">{{productName}}</strong>. Para empezar a emitir comprobantes contra ARCA necesitamos confirmar que este email es tuyo.
+</p>
+
+<!-- CTA bulletproof -->
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 24px;">
+  <tr>
+    <td align="left">
+      <!--[if mso]>
+      <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="{{link}}" style="height:48px;v-text-anchor:middle;width:240px;" arcsize="21%" stroke="f" fillcolor="#0B0B0D">
+        <w:anchorlock/>
+        <center style="color:#FFFFFF;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;font-weight:600;">Verificar mi email &rarr;</center>
+      </v:roundrect>
+      <![endif]-->
+      <!--[if !mso]><!-- -->
+      <a href="{{link}}" style="display:inline-block;padding:14px 28px;background:#0B0B0D;color:#FFFFFF;font-size:14px;font-weight:500;text-decoration:none;border-radius:10px;">
+        Verificar mi email &rarr;
+      </a>
+      <!--<![endif]-->
+    </td>
+  </tr>
+</table>
+
+<!-- Fallback link -->
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:0 0 20px;background:#F7F7F5;border:1px solid #E5E5E0;border-radius:8px;">
+  <tr>
+    <td style="padding:16px;">
+      <p style="margin:0 0 6px;color:#8A8A82;font-size:10px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;">
+        ¿No funciona el botón?
+      </p>
+      <p style="margin:0;color:{{primaryColor}};font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;line-height:1.5;word-break:break-all;">
+        <a href="{{link}}" style="color:{{primaryColor}};text-decoration:none;">{{link}}</a>
+      </p>
+    </td>
+  </tr>
+</table>
+
+<!-- Expiración -->
+<p style="margin:0 0 24px;color:#55554E;font-size:12px;line-height:1.55;">
+  &bull;&nbsp;&nbsp;El link vence en <strong style="color:#0B0B0D;font-weight:600;">{{ttlHours}} horas</strong>. Si expiró, pedí uno nuevo desde el dashboard o al intentar loguearte.
+</p>
+
+<!-- Separador -->
+<div style="height:1px;background:#E5E5E0;margin:0 0 20px;"></div>
+
+<!-- Próximos pasos -->
+<p style="margin:0 0 12px;color:#8A8A82;font-size:10px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;">
+  Después de verificar podés
+</p>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:0 0 24px;">
+  <tr>
+    <td style="padding:4px 0;vertical-align:top;width:28px;color:{{primaryColor}};font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;font-weight:500;">01</td>
+    <td style="padding:4px 0;color:#55554E;font-size:13px;line-height:1.5;">Subir tu certificado AFIP y empezar a emitir facturas</td>
+  </tr>
+  <tr>
+    <td style="padding:4px 0;vertical-align:top;width:28px;color:{{primaryColor}};font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;font-weight:500;">02</td>
+    <td style="padding:4px 0;color:#55554E;font-size:13px;line-height:1.5;">Crear API keys para integrar con tu backend</td>
+  </tr>
+  <tr>
+    <td style="padding:4px 0;vertical-align:top;width:28px;color:{{primaryColor}};font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;font-weight:500;">03</td>
+    <td style="padding:4px 0;color:#55554E;font-size:13px;line-height:1.5;">Configurar tareas programadas y webhooks</td>
+  </tr>
+</table>
+
+<!-- Aviso de seguridad -->
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#F7F7F5;border-left:2px solid #B45309;border-radius:6px;">
+  <tr>
+    <td style="padding:14px;">
+      <p style="margin:0 0 4px;color:#0B0B0D;font-size:12px;font-weight:600;">
+        ¿No te registraste vos?
+      </p>
+      <p style="margin:0;color:#55554E;font-size:12px;line-height:1.55;">
+        Podés ignorar este email, la cuenta no queda activa sin confirmación. Si creés que alguien usó tu dirección, escribinos a <a href="mailto:{{supportEmail}}" style="color:{{primaryColor}};font-weight:500;text-decoration:none;">{{supportEmail}}</a>.
+      </p>
+    </td>
+  </tr>
+</table>

@@ -1,0 +1,39 @@
+<h1 style="margin:0 0 16px;color:#0F172A;font-size:28px;font-weight:700;letter-spacing:-0.02em;line-height:1.2;">Nuevo dispositivo conectado</h1>
+<p style="margin:0 0 24px;color:#475569;font-size:16px;line-height:1.6;">
+  Hola <strong style="color:#0F172A;">{{userName}}</strong>, detectamos un acceso a tu cuenta desde un dispositivo que no habíamos visto antes.
+</p>
+
+<div style="padding:20px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;margin:24px 0;">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;">
+    <tr>
+      <td style="padding:6px 0;">
+        <span style="color:#64748B;font-size:13px;">Dispositivo</span><br>
+        <strong style="color:#0F172A;font-size:15px;">{{deviceLabel}}</strong>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:6px 0;border-top:1px solid #E2E8F0;">
+        <span style="color:#64748B;font-size:13px;">IP de origen</span><br>
+        <code style="color:#0F172A;font-size:14px;font-family:monospace;background:#F1F5F9;padding:2px 6px;border-radius:4px;">{{ip}}</code>
+      </td>
+    </tr>
+  </table>
+</div>
+
+<div style="padding:16px;background:#FEF3C7;border-left:4px solid #F59E0B;border-radius:6px;margin:24px 0;">
+  <p style="margin:0;color:#78350F;font-size:14px;line-height:1.5;">
+    <strong>¿No fuiste vos?</strong> Cerrá todas las sesiones y cambiá tu contraseña de inmediato.
+  </p>
+</div>
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:32px 0;">
+  <tr>
+    <td align="center" style="background:{{primaryColor}};border-radius:10px;">
+      <a href="{{securityUrl}}" style="display:inline-block;padding:14px 32px;background:{{primaryColor}};color:#FFFFFF;font-size:16px;font-weight:600;text-decoration:none;border-radius:10px;">Revisar mis sesiones →</a>
+    </td>
+  </tr>
+</table>
+
+<p style="margin:24px 0 0;color:#64748B;font-size:13px;line-height:1.5;">
+  Si fuiste vos, no necesitás hacer nada. Este email es solo informativo.
+</p>

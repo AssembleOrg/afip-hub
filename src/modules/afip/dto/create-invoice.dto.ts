@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsNotEmpty, IsString, IsNumber, IsOptional, IsEnum, Min, IsArray, ValidateNested, IsBoolean } from 'class-validator';
+import { IsNotEmpty, IsString, IsNumber, IsOptional, IsEnum, Min, IsArray, ArrayMinSize, ValidateNested, ValidateIf, IsBoolean, Matches } from 'class-validator';
 import { Type, Transform } from 'class-transformer';
 
 /**
@@ -168,6 +168,35 @@ export class ComprobanteAsociadoDto {
 }
 
 /**
+ * Período asociado (alternativa a CbteAsoc para NC/ND que ajustan un rango de fechas)
+ */
+export class PeriodoAsocDto {
+  @ApiProperty({ description: 'Fecha desde (YYYYMMDD)', example: '20260101' })
+  @IsString()
+  @Matches(/^\d{8}$/, { message: 'FchDesde debe ser YYYYMMDD' })
+  FchDesde: string;
+
+  @ApiProperty({ description: 'Fecha hasta (YYYYMMDD)', example: '20260131' })
+  @IsString()
+  @Matches(/^\d{8}$/, { message: 'FchHasta debe ser YYYYMMDD' })
+  FchHasta: string;
+}
+
+/**
+ * Opcional genérico que AFIP soporta en `<Opcionales><Opcional>`.
+ * Ej: {Id: 22, Valor: 'S'} marca que la NC/ND es de anulación.
+ */
+export class OpcionalDto {
+  @ApiProperty({ description: 'Código del opcional (tabla AFIP)', example: 22 })
+  @IsNumber()
+  Id: number;
+
+  @ApiProperty({ description: 'Valor del opcional', example: 'S' })
+  @IsString()
+  Valor: string;
+}
+
+/**
  * Datos para CBU (Facturas de Crédito Electrónica MiPyME)
  */
 export class CbuDto {
@@ -296,16 +325,54 @@ export class CreateInvoiceDto {
   @Type(() => IvaDto)
   iva?: IvaDto[];
 
-  @ApiProperty({ 
-    description: 'Comprobantes asociados (requerido para Notas de Crédito/Débito)',
+  @ApiProperty({
+    description:
+      'Comprobantes asociados. Para NC/ND (tipos 2, 3, 7, 8, 12, 13, 52, 53, 202, 203, 207, 208, 212, 213): obligatorio UNO de los dos (comprobantesAsociados O periodoAsociado).',
     type: [ComprobanteAsociadoDto],
-    required: false
+    required: false,
+  })
+  @ValidateIf(
+    (o: CreateInvoiceDto) =>
+      esNotaCreditoDebito(o.tipoComprobante) && !o.periodoAsociado,
+  )
+  @IsArray({ message: 'Las NC/ND requieren al menos un comprobante asociado o un periodoAsociado' })
+  @ArrayMinSize(1, { message: 'Las NC/ND requieren al menos un comprobante asociado o un periodoAsociado' })
+  @IsOptional()
+  @ValidateNested({ each: true })
+  @Type(() => ComprobanteAsociadoDto)
+  comprobantesAsociados?: ComprobanteAsociadoDto[];
+
+  @ApiProperty({
+    description:
+      'Período asociado (alternativa a comprobantesAsociados para NC/ND que ajustan un rango de fechas). Prohibido en Facturas y en NC FCE.',
+    type: PeriodoAsocDto,
+    required: false,
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => PeriodoAsocDto)
+  periodoAsociado?: PeriodoAsocDto;
+
+  @ApiProperty({
+    description:
+      'Opcionales genéricos (se mandan tal cual a AFIP). Ej: [{Id:22, Valor:"S"}] marca anulación. Usá `esAnulacion` como atajo en lugar de armarlo manualmente.',
+    type: [OpcionalDto],
+    required: false,
   })
   @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
-  @Type(() => ComprobanteAsociadoDto)
-  comprobantesAsociados?: ComprobanteAsociadoDto[];
+  @Type(() => OpcionalDto)
+  opcionales?: OpcionalDto[];
+
+  @ApiPropertyOptional({
+    description:
+      'Si true y el tipo es NC/ND: se inyecta automáticamente el opcional 22=S (anulación). Si false y es NC FCE: se inyecta 22=N (requerido por AFIP). Para NC no FCE normales se puede omitir.',
+    example: false,
+  })
+  @IsOptional()
+  @IsBoolean()
+  esAnulacion?: boolean;
 
   @ApiProperty({ description: 'Moneda ID (PES = Pesos, DOL = Dólares, EUR = Euros)', example: 'PES', required: false })
   @IsOptional()

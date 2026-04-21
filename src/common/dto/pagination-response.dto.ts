@@ -17,16 +17,29 @@ export class PaginationResponseDto<T> {
   @ApiProperty({ type: PaginationMetaDto })
   meta: PaginationMetaDto;
 
+  @ApiProperty()
+  requestId: string;
+
+  @ApiProperty()
+  path: string;
+
+  @ApiProperty()
+  requestType: string;
+
   constructor(
     data: T[],
-    meta: PaginationMetaDto,
+    paginationMeta: PaginationMetaDto,
+    requestMeta?: { requestId: string; path: string; requestType: string },
     message = 'Operación exitosa',
   ) {
     this.data = data;
     this.success = true;
     this.message = message;
     this.timestamp = new Date().toISOString();
-    this.meta = meta;
+    this.meta = paginationMeta;
+    this.requestId = requestMeta?.requestId ?? '';
+    this.path = requestMeta?.path ?? '';
+    this.requestType = requestMeta?.requestType ?? '';
   }
 }
 

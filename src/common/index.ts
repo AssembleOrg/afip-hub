@@ -1,8 +1,9 @@
 export * from './decorators';
 export * from './dto';
 export * from './enums';
+export * from './events';
 export * from './filters';
 export * from './guards';
 export * from './interceptors';
+export * from './types';
 export * from './utils';
-

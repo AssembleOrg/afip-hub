@@ -1,0 +1,45 @@
+<div style="padding:20px;background:#FEE2E2;border-left:4px solid #DC2626;border-radius:8px;margin:0 0 24px;">
+  <p style="margin:0;color:#991B1B;font-size:14px;font-weight:600;">⚠ Cobro rechazado</p>
+</div>
+
+<h1 style="margin:0 0 16px;color:#0F172A;font-size:28px;font-weight:700;letter-spacing:-0.02em;line-height:1.2;">No pudimos cobrar tu suscripción</h1>
+<p style="margin:0 0 24px;color:#475569;font-size:16px;line-height:1.6;">
+  Hola {{userName}}, intentamos cobrar tu plan <strong style="color:#0F172A;">{{planName}}</strong> por MercadoPago y el pago fue rechazado.
+</p>
+
+<div style="padding:20px;background:#F8FAFC;border-radius:12px;margin:24px 0;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+    <tr>
+      <td style="padding:8px 0;color:#64748B;font-size:14px;">Plan:</td>
+      <td align="right" style="padding:8px 0;color:#0F172A;font-size:14px;font-weight:600;">{{planName}}</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 0;color:#64748B;font-size:14px;">Monto:</td>
+      <td align="right" style="padding:8px 0;color:#0F172A;font-size:14px;font-weight:600;">${{amountArs}} ARS (US${{amountUsd}})</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 0;color:#64748B;font-size:14px;">Motivo:</td>
+      <td align="right" style="padding:8px 0;color:#DC2626;font-size:14px;font-weight:600;">{{reason}}</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 0;color:#64748B;font-size:14px;">Intento:</td>
+      <td align="right" style="padding:8px 0;color:#0F172A;font-size:14px;font-weight:600;">{{attemptedAt}}</td>
+    </tr>
+  </table>
+</div>
+
+<p style="margin:24px 0;color:#475569;font-size:15px;line-height:1.6;">
+  MercadoPago reintentará automáticamente en los próximos días. Para evitar que tu servicio se suspenda, actualizá tu medio de pago ahora:
+</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0;">
+  <tr>
+    <td align="center" style="background:{{primaryColor}};border-radius:10px;">
+      <a href="{{dashboardUrl}}/billing" style="display:inline-block;padding:14px 32px;background:{{primaryColor}};color:#FFFFFF;font-size:16px;font-weight:600;text-decoration:none;border-radius:10px;">Actualizar medio de pago →</a>
+    </td>
+  </tr>
+</table>
+
+<p style="margin:24px 0 0;color:#64748B;font-size:13px;line-height:1.5;">
+  Si no se regulariza en <strong>7 días</strong>, tu organización pasará al estado <strong>PAST_DUE</strong> y la API empezará a rechazar nuevos requests hasta que el pago sea exitoso.
+</p>

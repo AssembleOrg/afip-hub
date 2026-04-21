@@ -1,0 +1,59 @@
+<div style="padding:20px;background:#DCFCE7;border-left:4px solid #16A34A;border-radius:8px;margin:0 0 24px;">
+  <p style="margin:0;color:#14532D;font-size:14px;font-weight:600;">✓ Suscripción activada</p>
+</div>
+
+<h1 style="margin:0 0 16px;color:#0F172A;font-size:28px;font-weight:700;letter-spacing:-0.02em;line-height:1.2;">¡Estás en {{planName}}!</h1>
+<p style="margin:0 0 24px;color:#475569;font-size:16px;line-height:1.6;">
+  Gracias {{userName}}. Tu suscripción ya está activa y tu organización <strong style="color:#0F172A;">{{orgName}}</strong> tiene acceso completo al plan <strong>{{planName}}</strong>.
+</p>
+
+<div style="padding:24px;background:linear-gradient(135deg,#F8FAFC 0%,#E2E8F0 100%);border-radius:12px;margin:24px 0;">
+  <h3 style="margin:0 0 16px;color:#0F172A;font-size:16px;font-weight:700;">Lo que incluye tu plan</h3>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+    <tr>
+      <td style="padding:6px 0;color:#0F172A;font-size:15px;">
+        <span style="color:#16A34A;font-weight:700;">✓</span> &nbsp; <strong>{{requestsLimit}}</strong> requests/mes
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:6px 0;color:#0F172A;font-size:15px;">
+        <span style="color:#16A34A;font-weight:700;">✓</span> &nbsp; Hasta <strong>{{cuitLimit}}</strong> CUITs emisores
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:6px 0;color:#0F172A;font-size:15px;">
+        <span style="color:#16A34A;font-weight:700;">✓</span> &nbsp; 2% de gracia sobre el límite
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:6px 0;color:#0F172A;font-size:15px;">
+        <span style="color:#16A34A;font-weight:700;">✓</span> &nbsp; Rate-limit <strong>{{pdfRateLimit}}</strong> PDFs/min
+      </td>
+    </tr>
+  </table>
+</div>
+
+<div style="padding:20px;background:#F8FAFC;border-radius:12px;margin:24px 0;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+    <tr>
+      <td style="padding:6px 0;color:#64748B;font-size:14px;">Próximo cobro:</td>
+      <td align="right" style="padding:6px 0;color:#0F172A;font-size:14px;font-weight:600;">{{nextBillingDate}}</td>
+    </tr>
+    <tr>
+      <td style="padding:6px 0;color:#64748B;font-size:14px;">Monto:</td>
+      <td align="right" style="padding:6px 0;color:#0F172A;font-size:14px;font-weight:600;">${{amountArs}} ARS (US${{amountUsd}})</td>
+    </tr>
+    <tr>
+      <td style="padding:6px 0;color:#64748B;font-size:14px;">Cotización usada:</td>
+      <td align="right" style="padding:6px 0;color:#0F172A;font-size:14px;font-weight:600;">$US1 = ${{exchangeRate}} ARS</td>
+    </tr>
+  </table>
+</div>
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0;">
+  <tr>
+    <td align="center" style="background:{{primaryColor}};border-radius:10px;">
+      <a href="{{dashboardUrl}}" style="display:inline-block;padding:14px 32px;background:{{primaryColor}};color:#FFFFFF;font-size:16px;font-weight:600;text-decoration:none;border-radius:10px;">Ir al dashboard →</a>
+    </td>
+  </tr>
+</table>

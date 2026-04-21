@@ -1,0 +1,55 @@
+<div style="padding:20px;background:#FEF3C7;border-left:4px solid #F59E0B;border-radius:8px;margin:0 0 24px;">
+  <p style="margin:0;color:#78350F;font-size:14px;font-weight:600;">⚡ El dólar blue se movió fuerte</p>
+</div>
+
+<h1 style="margin:0 0 16px;color:#0F172A;font-size:28px;font-weight:700;letter-spacing:-0.02em;line-height:1.2;">Tu próximo cobro cambió</h1>
+<p style="margin:0 0 24px;color:#475569;font-size:16px;line-height:1.6;">
+  Hola {{userName}}, como el precio del plan está indexado al dólar blue y la cotización se movió <strong>{{percentChange}}%</strong>, actualizamos el monto del próximo cobro de tu suscripción.
+</p>
+
+<div style="padding:20px;background:#F8FAFC;border-radius:12px;margin:24px 0;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+    <tr>
+      <td style="padding:8px 0;color:#64748B;font-size:14px;">Plan:</td>
+      <td align="right" style="padding:8px 0;color:#0F172A;font-size:14px;font-weight:600;">{{planName}}</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 0;color:#64748B;font-size:14px;">Precio en USD:</td>
+      <td align="right" style="padding:8px 0;color:#0F172A;font-size:14px;font-weight:600;">US${{amountUsd}} (sin cambios)</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 0;border-top:1px solid #E2E8F0;color:#64748B;font-size:14px;">Cobro anterior:</td>
+      <td align="right" style="padding:8px 0;border-top:1px solid #E2E8F0;color:#64748B;font-size:14px;text-decoration:line-through;">${{oldAmountArs}} ARS</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 0;color:#0F172A;font-size:15px;font-weight:600;">Próximo cobro:</td>
+      <td align="right" style="padding:8px 0;color:{{primaryColor}};font-size:15px;font-weight:700;">${{newAmountArs}} ARS</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 0;color:#64748B;font-size:14px;">Fecha del cobro:</td>
+      <td align="right" style="padding:8px 0;color:#0F172A;font-size:14px;font-weight:600;">{{nextBillingDate}}</td>
+    </tr>
+  </table>
+</div>
+
+<p style="margin:24px 0;color:#475569;font-size:14px;line-height:1.6;">
+  {{#if needsReauth}}
+    <strong style="color:#DC2626;">Atención:</strong> como el cambio supera el 20%, MercadoPago requiere que re-autorices la suscripción. Ingresá al dashboard para confirmar:
+  {{else}}
+    MercadoPago cobrará automáticamente el nuevo monto. No necesitás hacer nada.
+  {{/if}}
+</p>
+
+{{#if needsReauth}}
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0;">
+  <tr>
+    <td align="center" style="background:{{primaryColor}};border-radius:10px;">
+      <a href="{{dashboardUrl}}/billing" style="display:inline-block;padding:14px 32px;background:{{primaryColor}};color:#FFFFFF;font-size:16px;font-weight:600;text-decoration:none;border-radius:10px;">Re-autorizar suscripción →</a>
+    </td>
+  </tr>
+</table>
+{{/if}}
+
+<p style="margin:24px 0 0;color:#64748B;font-size:13px;line-height:1.5;">
+  Cotización usada: <strong>$US1 = ${{exchangeRate}} ARS</strong> (dolarapi blue, {{exchangeRateDate}}).
+</p>

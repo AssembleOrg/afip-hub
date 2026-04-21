@@ -1,17 +1,46 @@
-import { Controller, Post, Get, Body, Query, Res, Header, StreamableFile, BadRequestException } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiProduces } from '@nestjs/swagger';
+import {
+  Controller,
+  Post,
+  Get,
+  UseInterceptors,
+  Body,
+  Query,
+  Res,
+  StreamableFile,
+  BadRequestException,
+  Req,
+} from '@nestjs/common';
+import type { Response } from 'express';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiProduces,
+} from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { AfipService } from './afip.service';
 import { InvoicePdfService } from './invoice-pdf.service';
+import { InvoicesService } from '@/modules/invoices/invoices.service';
+import type { SaasRequest } from '@/common/types';
 import { AfipLoginDto, AfipTicketDto } from './dto';
-import { CreateInvoiceDto, AlicuotaIva, Concepto } from './dto/create-invoice.dto';
+import {
+  CreateInvoiceDto,
+  AlicuotaIva,
+  Concepto,
+} from './dto/create-invoice.dto';
 import { CreateCommerceInvoiceDto } from './dto/create-commerce-invoice.dto';
 import { InvoiceResponseDto, QrDataDto } from './dto/invoice-response.dto';
-import { UltimoAutorizadoDto, UltimoAutorizadoResponseDto } from './dto/ultimo-autorizado.dto';
-import { ConsultarContribuyenteDto, ContribuyenteResponseDto } from './dto/consultar-contribuyente.dto';
-import { 
-  AfipParamsRequestDto, 
-  CondicionesIvaRequestDto, 
+import {
+  UltimoAutorizadoDto,
+  UltimoAutorizadoResponseDto,
+} from './dto/ultimo-autorizado.dto';
+import {
+  ConsultarContribuyenteDto,
+  ContribuyenteResponseDto,
+} from './dto/consultar-contribuyente.dto';
+import {
+  AfipParamsRequestDto,
+  CondicionesIvaRequestDto,
   TipoComprobanteResponseDto,
   PuntoVentaResponseDto,
   CondicionIvaReceptorResponseDto,
@@ -33,8 +62,9 @@ import {
   ComprobantesTipoConsultarDto,
   DocumentosTipoConsultarDto,
   OpcionalesTipoConsultarDto,
-  ComprobanteDummyDto,
   ComprobanteConstatarResponseDto,
+  ConstatarComprobanteCompletoDto,
+  ConstatarComprobanteCompletoResponseDto,
   ModalidadResponseDto,
   TipoComprobanteWscdcResponseDto,
   TipoDocumentoResponseDto,
@@ -44,32 +74,46 @@ import {
 import { GenerateInvoicePdfDto } from './dto/generate-invoice-pdf.dto';
 import { GenerateInvoicePdfBatchDto } from './dto/generate-invoice-pdf-batch.dto';
 import { ResponseDto } from '@/common/dto';
-import { Auditory, Public } from '@/common';
+import {
+  ApiKeyAuth,
+  Auditory,
+  Billable,
+  CertificateResolverInterceptor,
+  Idempotent,
+  PdfBillable,
+  Public,
+  TaBillable,
+} from '@/common';
 
 @ApiTags('AFIP')
-@Controller('afip')
-@Public()
+@Controller({ path: 'afip', version: '1' })
+@ApiKeyAuth()
+@UseInterceptors(CertificateResolverInterceptor)
 export class AfipController {
   constructor(
     private readonly afipService: AfipService,
     private readonly configService: ConfigService,
     private readonly invoicePdfService: InvoicePdfService,
+    private readonly invoicesService: InvoicesService,
   ) {}
 
+  @Public()
   @Get('status')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Estado del servicio y entorno AFIP',
-    description: 'Muestra el entorno de AFIP configurado (producción/homologación) y las URLs activas.'
+    description:
+      'Muestra el entorno de AFIP configurado (producción/homologación) y las URLs activas.',
   })
   @ApiResponse({
     status: 200,
     description: 'Estado del servicio',
   })
   getStatus() {
-    const environment = this.configService.get<string>('afip.environment') || 'homologacion';
+    const environment =
+      this.configService.get<string>('afip.environment') || 'homologacion';
     const wsaaUrl = this.configService.get<string>('afip.wsaaUrl') || '';
     const wsfeUrl = this.configService.get<string>('afip.wsfeUrl') || '';
-    
+
     return {
       status: 'ok',
       environment,
@@ -78,16 +122,21 @@ export class AfipController {
         wsaa: wsaaUrl,
         wsfe: wsfeUrl,
       },
-      warning: environment === 'production' 
-        ? '⚠️ PRODUCCIÓN: Las facturas emitidas son fiscalmente válidas'
-        : '✅ HOMOLOGACIÓN: Entorno de pruebas, sin efecto fiscal',
+      warning:
+        environment === 'production'
+          ? '⚠️ PRODUCCIÓN: Las facturas emitidas son fiscalmente válidas'
+          : '✅ HOMOLOGACIÓN: Entorno de pruebas, sin efecto fiscal',
       timestamp: new Date().toISOString(),
     };
   }
 
   @Post('login')
+  @TaBillable()
   @Auditory('Obtener ticket de AFIP')
-  @ApiOperation({ summary: 'Obtener ticket de acceso de AFIP' })
+  @ApiOperation({
+    summary:
+      'Obtener ticket de acceso de AFIP (no cuenta para quota, pero aplica rate-limit anti-abuso)',
+  })
   @ApiResponse({
     status: 200,
     description: 'Ticket obtenido exitosamente',
@@ -99,15 +148,17 @@ export class AfipController {
   ): Promise<ResponseDto<AfipTicketDto>> {
     const ticket = await this.afipService.getTicket(
       afipLoginDto.service,
-      (afipLoginDto as any).certificado,
-      (afipLoginDto as any).clavePrivada,
+      afipLoginDto.certificado,
+      afipLoginDto.clavePrivada,
     );
     return new ResponseDto(ticket, 'Ticket obtenido exitosamente');
   }
 
   @Post('invoice')
+  @Billable()
+  @Idempotent()
   @Auditory('Crear factura electrónica')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Crear factura electrónica en AFIP',
     description: `
 Crea un comprobante electrónico (factura, nota de crédito, nota de débito, etc.) en AFIP.
@@ -126,7 +177,7 @@ Crea un comprobante electrónico (factura, nota de crédito, nota de débito, et
 - Clase C: 1, 4, 5, 6, 7, 8, 9, 10, 13, 15, 16
 
 **Importante:** Desde 01/02/2026 el campo condicionIvaReceptor es OBLIGATORIO.
-    `
+    `,
   })
   @ApiResponse({
     status: 200,
@@ -136,13 +187,16 @@ Crea un comprobante electrónico (factura, nota de crédito, nota de débito, et
   @ApiResponse({ status: 400, description: 'Error en la solicitud' })
   async createInvoice(
     @Body() createInvoiceDto: CreateInvoiceDto,
+    @Req() req: SaasRequest,
   ): Promise<ResponseDto<InvoiceResponseDto>> {
-    console.log('createInvoiceDto', createInvoiceDto);
     const invoice = await this.afipService.createInvoice(createInvoiceDto);
+    await this.persistInvoiceIfOk(req, createInvoiceDto, invoice);
     return new ResponseDto(invoice, 'Factura creada exitosamente');
   }
 
   @Post('invoice/comercio')
+  @Billable()
+  @Idempotent()
   @Auditory('Crear factura electrónica para comercio (múltiples ítems)')
   @ApiOperation({
     summary: 'Crear factura para comercio con múltiples ítems',
@@ -161,17 +215,24 @@ Nota: AFIP WSFE no persiste el detalle de ítems; se autoriza por importes agreg
   @ApiResponse({ status: 400, description: 'Error en la solicitud' })
   async createCommerceInvoice(
     @Body() createCommerceInvoiceDto: CreateCommerceInvoiceDto,
+    @Req() req: SaasRequest,
   ): Promise<ResponseDto<InvoiceResponseDto>> {
-    const invoiceRequest = this.mapCommerceInvoiceToStandard(createCommerceInvoiceDto);
+    const invoiceRequest = this.mapCommerceInvoiceToStandard(
+      createCommerceInvoiceDto,
+    );
     const invoice = await this.afipService.createInvoice(invoiceRequest);
+    await this.persistInvoiceIfOk(req, invoiceRequest, invoice);
     return new ResponseDto(invoice, 'Factura de comercio creada exitosamente');
   }
 
   @Post('ultimo-autorizado')
+  @Billable()
   @Auditory('Consultar último comprobante autorizado')
-  @ApiOperation({ 
-    summary: 'Obtener el último comprobante autorizado para un punto de venta y tipo',
-    description: 'Consulta el último número de comprobante autorizado para un punto de venta y tipo específico. Útil para determinar el próximo número a usar.'
+  @ApiOperation({
+    summary:
+      'Obtener el último comprobante autorizado para un punto de venta y tipo',
+    description:
+      'Consulta el último número de comprobante autorizado para un punto de venta y tipo específico. Útil para determinar el próximo número a usar.',
   })
   @ApiResponse({
     status: 200,
@@ -183,18 +244,16 @@ Nota: AFIP WSFE no persiste el detalle de ítems; se autoriza por importes agreg
     @Body() ultimoAutorizadoDto: UltimoAutorizadoDto,
   ): Promise<ResponseDto<UltimoAutorizadoResponseDto>> {
     try {
-      // Obtener ticket primero usando los certificados del request
-      const dto = ultimoAutorizadoDto as any;
-      const homologacion = ultimoAutorizadoDto.homologacion !== undefined ? ultimoAutorizadoDto.homologacion : false;
+      const homologacion = ultimoAutorizadoDto.homologacion ?? false;
       const ticket = await this.afipService.getTicket(
         'wsfe',
-        dto.certificado,
-        dto.clavePrivada,
+        ultimoAutorizadoDto.certificado,
+        ultimoAutorizadoDto.clavePrivada,
         homologacion,
       );
-      
-      const cuitEmisor = dto.cuitEmisor.replace(/-/g, ''); // Remover guiones si los tiene
-      
+
+      const cuitEmisor = ultimoAutorizadoDto.cuitEmisor.replaceAll('-', ''); // Remover guiones si los tiene
+
       // Consultar último autorizado
       // Si no hay comprobantes previos (primera factura), el servicio devuelve CbteNro: 0
       const ultimo = await this.afipService.getUltimoAutorizado(
@@ -211,36 +270,47 @@ Nota: AFIP WSFE no persiste el detalle de ítems; se autoriza por importes agreg
         proximoNumero: ultimo.CbteNro + 1,
       };
 
-      return new ResponseDto(response, 'Último comprobante obtenido exitosamente');
-    } catch (error: any) {
+      return new ResponseDto(
+        response,
+        'Último comprobante obtenido exitosamente',
+      );
+    } catch (error: unknown) {
       // Si el error contiene "Not Found", es la primera factura - devolver valores por defecto
-      const errorMessage = (error.message || '').toLowerCase();
-      if (errorMessage.includes('not found') || errorMessage.includes('no encontrado')) {
+      const errorMessage = this.getErrorMessage(error).toLowerCase();
+      if (
+        errorMessage.includes('not found') ||
+        errorMessage.includes('no encontrado')
+      ) {
         const now = new Date();
         const year = now.getFullYear();
         const month = String(now.getMonth() + 1).padStart(2, '0');
         const day = String(now.getDate()).padStart(2, '0');
         const fechaActual = `${year}${month}${day}`;
-        
+
         const response: UltimoAutorizadoResponseDto = {
           CbteNro: 0,
           CbteFch: fechaActual,
           proximoNumero: 1,
         };
-        
-        return new ResponseDto(response, 'No se encontraron comprobantes previos (primera factura)');
+
+        return new ResponseDto(
+          response,
+          'No se encontraron comprobantes previos (primera factura)',
+        );
       }
-      
+
       // Re-lanzar otros errores
       throw error;
     }
   }
 
   @Post('consultar-contribuyente')
+  @Billable()
   @Auditory('Consultar datos de contribuyente')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Consultar datos de un contribuyente en AFIP',
-    description: 'Obtiene información de un contribuyente: denominación, condición IVA, domicilio, etc.'
+    description:
+      'Obtiene información de un contribuyente: denominación, condición IVA, domicilio, etc.',
   })
   @ApiResponse({
     status: 200,
@@ -252,14 +322,19 @@ Nota: AFIP WSFE no persiste el detalle de ítems; se autoriza por importes agreg
     @Body() consultaDto: ConsultarContribuyenteDto,
   ): Promise<ResponseDto<ContribuyenteResponseDto>> {
     const datos = await this.afipService.consultarContribuyente(consultaDto);
-    return new ResponseDto(datos, 'Datos del contribuyente obtenidos exitosamente');
+    return new ResponseDto(
+      datos,
+      'Datos del contribuyente obtenidos exitosamente',
+    );
   }
 
   @Post('tipos-comprobante')
+  @Billable()
   @Auditory('Consultar tipos de comprobante')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Obtener tipos de comprobante habilitados para el emisor',
-    description: 'Lista todos los tipos de comprobante que el emisor está autorizado a emitir.'
+    description:
+      'Lista todos los tipos de comprobante que el emisor está autorizado a emitir.',
   })
   @ApiResponse({
     status: 200,
@@ -270,21 +345,26 @@ Nota: AFIP WSFE no persiste el detalle de ítems; se autoriza por importes agreg
   async getTiposComprobante(
     @Body() paramsDto: AfipParamsRequestDto,
   ): Promise<ResponseDto<TipoComprobanteResponseDto[]>> {
-    const homologacion = paramsDto.homologacion !== undefined ? paramsDto.homologacion : false;
+    const homologacion = paramsDto.homologacion ?? false;
     const tipos = await this.afipService.getTiposComprobante(
       paramsDto.cuitEmisor,
       paramsDto.certificado,
       paramsDto.clavePrivada,
       homologacion,
     );
-    return new ResponseDto(tipos, 'Tipos de comprobante obtenidos exitosamente');
+    return new ResponseDto(
+      tipos,
+      'Tipos de comprobante obtenidos exitosamente',
+    );
   }
 
   @Post('puntos-venta')
+  @Billable()
   @Auditory('Consultar puntos de venta')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Obtener puntos de venta habilitados para el emisor',
-    description: 'Lista todos los puntos de venta habilitados para facturación electrónica.'
+    description:
+      'Lista todos los puntos de venta habilitados para facturación electrónica.',
   })
   @ApiResponse({
     status: 200,
@@ -295,7 +375,7 @@ Nota: AFIP WSFE no persiste el detalle de ítems; se autoriza por importes agreg
   async getPuntosVenta(
     @Body() paramsDto: AfipParamsRequestDto,
   ): Promise<ResponseDto<PuntoVentaResponseDto[]>> {
-    const homologacion = paramsDto.homologacion !== undefined ? paramsDto.homologacion : false;
+    const homologacion = paramsDto.homologacion ?? false;
     const puntos = await this.afipService.getPuntosVenta(
       paramsDto.cuitEmisor,
       paramsDto.certificado,
@@ -306,8 +386,9 @@ Nota: AFIP WSFE no persiste el detalle de ítems; se autoriza por importes agreg
   }
 
   @Post('condiciones-iva')
+  @Billable()
   @Auditory('Consultar condiciones IVA receptor')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Obtener condiciones IVA válidas para el receptor',
     description: `
 Obtiene las condiciones de IVA válidas para el receptor según la clase de comprobante.
@@ -319,7 +400,7 @@ Obtiene las condiciones de IVA válidas para el receptor según la clase de comp
 - M: Facturas M (con retención)
 
 Si no se especifica la clase, devuelve todas las combinaciones posibles.
-    `
+    `,
   })
   @ApiResponse({
     status: 200,
@@ -330,7 +411,7 @@ Si no se especifica la clase, devuelve todas las combinaciones posibles.
   async getCondicionesIva(
     @Body() paramsDto: CondicionesIvaRequestDto,
   ): Promise<ResponseDto<CondicionIvaReceptorResponseDto[]>> {
-    const homologacion = paramsDto.homologacion !== undefined ? paramsDto.homologacion : false;
+    const homologacion = paramsDto.homologacion ?? false;
     const condiciones = await this.afipService.getCondicionesIvaReceptor(
       paramsDto.cuitEmisor,
       paramsDto.certificado,
@@ -338,12 +419,15 @@ Si no se especifica la clase, devuelve todas las combinaciones posibles.
       paramsDto.claseComprobante,
       homologacion,
     );
-    return new ResponseDto(condiciones, 'Condiciones IVA obtenidas exitosamente');
+    return new ResponseDto(
+      condiciones,
+      'Condiciones IVA obtenidas exitosamente',
+    );
   }
 
   @Post('generar-qr')
   @Auditory('Generar código QR')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Generar datos para código QR de comprobante',
     description: `
 Genera los datos necesarios para crear el código QR según RG 4291.
@@ -352,24 +436,22 @@ El QR contiene información del comprobante codificada en base64.
 **URL resultante:** https://www.afip.gob.ar/fe/qr/?p={datos_base64}
 
 Este endpoint no requiere autenticación con AFIP, solo genera los datos del QR.
-    `
+    `,
   })
   @ApiResponse({
     status: 200,
     description: 'Datos QR generados exitosamente',
     type: ResponseDto<QrDataDto>,
   })
-  async generarQr(
-    @Body() qrDto: GenerarQrRequestDto,
-  ): Promise<ResponseDto<QrDataDto>> {
+  generarQr(@Body() qrDto: GenerarQrRequestDto): ResponseDto<QrDataDto> {
     // Formatear la fecha de YYYYMMDD a YYYY-MM-DD
     const fechaFormateada = `${qrDto.fecha.substring(0, 4)}-${qrDto.fecha.substring(4, 6)}-${qrDto.fecha.substring(6, 8)}`;
-    
+
     // Estructura JSON según especificación AFIP
     const qrJson = {
       ver: 1,
       fecha: fechaFormateada,
-      cuit: parseInt(qrDto.cuit),
+      cuit: Number.parseInt(qrDto.cuit),
       ptoVta: qrDto.ptoVta,
       tipoCmp: qrDto.tipoCmp,
       nroCmp: qrDto.nroCmp,
@@ -377,9 +459,9 @@ Este endpoint no requiere autenticación con AFIP, solo genera los datos del QR.
       moneda: qrDto.moneda,
       ctz: qrDto.ctz,
       tipoDocRec: qrDto.tipoDocRec,
-      nroDocRec: parseInt(qrDto.nroDocRec) || 0,
+      nroDocRec: Number.parseInt(qrDto.nroDocRec) || 0,
       tipoCodAut: 'E', // E = CAE
-      codAut: parseInt(qrDto.cae),
+      codAut: Number.parseInt(qrDto.cae),
     };
 
     // Codificar en base64 y generar URL
@@ -408,6 +490,7 @@ Este endpoint no requiere autenticación con AFIP, solo genera los datos del QR.
   }
 
   @Post('invoice/pdf')
+  @PdfBillable()
   @Auditory('Generar factura en PDF')
   @ApiOperation({
     summary: 'Generar factura en formato PDF',
@@ -435,16 +518,19 @@ El PDF incluye:
       },
     },
   })
-  @ApiResponse({ status: 400, description: 'Error en los datos del comprobante' })
+  @ApiResponse({
+    status: 400,
+    description: 'Error en los datos del comprobante',
+  })
   async generateInvoicePdf(
     @Body() dto: GenerateInvoicePdfDto,
-    @Res({ passthrough: true }) res,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
     const pdfBuffer = await this.invoicePdfService.generatePdf(dto);
 
     const pvStr = String(dto.puntoVenta).padStart(5, '0');
     const numStr = String(dto.numeroComprobante).padStart(8, '0');
-    const filename = `${dto.tipoComprobante.replace(/\s+/g, '_')}_${pvStr}-${numStr}.pdf`;
+    const filename = `${dto.tipoComprobante.replaceAll(/\s+/g, '_')}_${pvStr}-${numStr}.pdf`;
 
     res.set({
       'Content-Type': 'application/pdf',
@@ -455,6 +541,7 @@ El PDF incluye:
   }
 
   @Post('invoice/pdf/batch')
+  @PdfBillable()
   @Auditory('Generar lote de facturas en PDF')
   @ApiOperation({
     summary: 'Generar múltiples facturas en PDF (ZIP)',
@@ -477,7 +564,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   })
   async generateInvoicePdfBatch(
     @Body() dto: GenerateInvoicePdfBatchDto,
-    @Res({ passthrough: true }) res,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
     const zipBuffer = await this.invoicePdfService.generatePdfBatch(dto);
 
@@ -496,10 +583,12 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   // ============================================
 
   @Post('ve/comunicaciones')
+  @Billable()
   @Auditory('Consultar comunicaciones Ventanilla Electrónica')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Consultar comunicaciones de AFIP',
-    description: 'Obtiene las comunicaciones oficiales de AFIP (notificaciones, intimaciones, etc.) de forma paginada.'
+    description:
+      'Obtiene las comunicaciones oficiales de AFIP (notificaciones, intimaciones, etc.) de forma paginada.',
   })
   @ApiResponse({
     status: 200,
@@ -510,7 +599,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   async consultarComunicaciones(
     @Body() dto: ConsultarComunicacionesDto,
   ): Promise<ResponseDto<ComunicacionesPaginadasResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
+    const homologacion = dto.homologacion ?? false;
     const result = await this.afipService.consultarComunicaciones(
       dto.cuitRepresentada,
       dto.certificado,
@@ -521,14 +610,19 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
       homologacion,
     );
 
-    return new ResponseDto(result as ComunicacionesPaginadasResponseDto, 'Comunicaciones obtenidas exitosamente');
+    return new ResponseDto(
+      result as ComunicacionesPaginadasResponseDto,
+      'Comunicaciones obtenidas exitosamente',
+    );
   }
 
   @Post('ve/comunicacion')
+  @Billable()
   @Auditory('Leer comunicación Ventanilla Electrónica')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Leer una comunicación específica',
-    description: 'Obtiene el detalle completo de una comunicación incluyendo el cuerpo del mensaje y adjuntos.'
+    description:
+      'Obtiene el detalle completo de una comunicación incluyendo el cuerpo del mensaje y adjuntos.',
   })
   @ApiResponse({
     status: 200,
@@ -540,7 +634,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   async consumirComunicacion(
     @Body() dto: ConsumirComunicacionDto,
   ): Promise<ResponseDto<ComunicacionDetalleResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
+    const homologacion = dto.homologacion ?? false;
     const result = await this.afipService.consumirComunicacion(
       dto.cuitRepresentada,
       dto.certificado,
@@ -550,14 +644,19 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
       homologacion,
     );
 
-    return new ResponseDto(result as ComunicacionDetalleResponseDto, 'Comunicación leída exitosamente');
+    return new ResponseDto(
+      result as ComunicacionDetalleResponseDto,
+      'Comunicación leída exitosamente',
+    );
   }
 
   @Post('ve/sistemas-publicadores')
+  @Billable()
   @Auditory('Consultar sistemas publicadores VE')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Consultar sistemas publicadores',
-    description: 'Obtiene la lista de sistemas que publican comunicaciones en Ventanilla Electrónica (ARCA, DGCL, etc.)'
+    description:
+      'Obtiene la lista de sistemas que publican comunicaciones en Ventanilla Electrónica (ARCA, DGCL, etc.)',
   })
   @ApiResponse({
     status: 200,
@@ -567,7 +666,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   async consultarSistemasPublicadores(
     @Body() dto: ConsultarSistemasPublicadoresDto,
   ): Promise<ResponseDto<SistemasPublicadoresResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
+    const homologacion = dto.homologacion ?? false;
     const sistemas = await this.afipService.consultarSistemasPublicadores(
       dto.cuitRepresentada,
       dto.certificado,
@@ -576,14 +675,19 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
       homologacion,
     );
 
-    return new ResponseDto({ sistemas } as SistemasPublicadoresResponseDto, 'Sistemas publicadores obtenidos exitosamente');
+    return new ResponseDto(
+      { sistemas } as SistemasPublicadoresResponseDto,
+      'Sistemas publicadores obtenidos exitosamente',
+    );
   }
 
   @Post('ve/estados')
+  @Billable()
   @Auditory('Consultar estados de comunicación VE')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Consultar estados de comunicación',
-    description: 'Obtiene los estados posibles para las comunicaciones (No leída, Leída, etc.)'
+    description:
+      'Obtiene los estados posibles para las comunicaciones (No leída, Leída, etc.)',
   })
   @ApiResponse({
     status: 200,
@@ -593,7 +697,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   async consultarEstadosComunicacion(
     @Body() dto: ConsultarEstadosDto,
   ): Promise<ResponseDto<EstadosComunicacionResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
+    const homologacion = dto.homologacion ?? false;
     const estados = await this.afipService.consultarEstadosComunicacion(
       dto.cuitRepresentada,
       dto.certificado,
@@ -601,7 +705,10 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
       homologacion,
     );
 
-    return new ResponseDto({ estados } as EstadosComunicacionResponseDto, 'Estados obtenidos exitosamente');
+    return new ResponseDto(
+      { estados } as EstadosComunicacionResponseDto,
+      'Estados obtenidos exitosamente',
+    );
   }
 
   // ============================================
@@ -609,10 +716,12 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   // ============================================
 
   @Post('wscdc/constatar')
+  @Billable()
   @Auditory('Constatar comprobante WSCDC')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Constatar/verificar un comprobante',
-    description: 'Verifica si un comprobante existe, está autorizado y obtiene sus datos completos (CAE, fechas, importe, estado).'
+    description:
+      'Verifica si un comprobante existe, está autorizado y obtiene sus datos completos (CAE, fechas, importe, estado).',
   })
   @ApiResponse({
     status: 200,
@@ -623,7 +732,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   async constatarComprobante(
     @Body() dto: ComprobanteConstatarDto,
   ): Promise<ResponseDto<ComprobanteConstatarResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
+    const homologacion = dto.homologacion ?? false;
     const result = await this.afipService.constatarComprobante(
       dto.cuitEmisor,
       dto.certificado,
@@ -635,14 +744,65 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
       homologacion,
     );
 
-    return new ResponseDto(result as ComprobanteConstatarResponseDto, 'Comprobante constatado exitosamente');
+    return new ResponseDto(
+      result as ComprobanteConstatarResponseDto,
+      'Comprobante constatado exitosamente',
+    );
+  }
+
+  @Post('wscdc/constatar-completo')
+  @Billable()
+  @Auditory('Constatar comprobante WSCDC completo')
+  @ApiOperation({
+    summary: 'Constatar comprobante (request completo con CAE + importe + receptor)',
+    description: `Constatación real contra WSCDC: valida que el CAE, fecha, importe total y receptor (cuando aplica) coincidan con lo registrado en AFIP.
+
+**Diferencia vs /wscdc/constatar:** el legacy solo envía ptoVta+tipo+nro. Éste envía TODOS los campos obligatorios según la doc de ARCA y valida reglas:
+- Factura A / MiPyme → DocTipoReceptor=80 obligatorio
+- B/C con ImpTotal > 10.000.000 → receptor obligatorio
+- Si mandás uno de DocTipo/DocNro, obligatorio mandar ambos
+
+**Respuesta:** mapea Resultado A/R + Observaciones a \`APROBADO / APROBADO_CON_OBSERVACIONES / RECHAZADO\` con mensaje legible.`,
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Constatación realizada',
+    type: ResponseDto<ConstatarComprobanteCompletoResponseDto>,
+  })
+  @ApiResponse({ status: 400, description: 'Validación local o rechazo AFIP' })
+  async constatarComprobanteCompleto(
+    @Body() dto: ConstatarComprobanteCompletoDto,
+  ): Promise<ResponseDto<ConstatarComprobanteCompletoResponseDto>> {
+    const result = await this.afipService.constatarComprobanteCompleto({
+      cuitAutenticador: dto.cuitEmisor,
+      certificado: dto.certificado,
+      clavePrivada: dto.clavePrivada,
+      cbteModo: dto.cbteModo,
+      cuitEmisorComprobante: dto.cuitEmisorComprobante,
+      puntoVenta: dto.puntoVenta,
+      tipoComprobante: dto.tipoComprobante,
+      numeroComprobante: dto.numeroComprobante,
+      fechaComprobante: dto.fechaComprobante,
+      importeTotal: dto.importeTotal,
+      codAutorizacion: dto.codAutorizacion,
+      docTipoReceptor: dto.docTipoReceptor,
+      docNroReceptor: dto.docNroReceptor,
+      opcionales: dto.opcionales,
+      homologacion: dto.homologacion ?? false,
+    });
+    return new ResponseDto(
+      result as ConstatarComprobanteCompletoResponseDto,
+      `Constatación: ${result.resultado}`,
+    );
   }
 
   @Post('wscdc/modalidades')
+  @Billable()
   @Auditory('Consultar modalidades de comprobante WSCDC')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Consultar modalidades de autorización',
-    description: 'Obtiene las modalidades por las que puede ser autorizado un comprobante (CAE, CAEA, etc.)'
+    description:
+      'Obtiene las modalidades por las que puede ser autorizado un comprobante (CAE, CAEA, etc.)',
   })
   @ApiResponse({
     status: 200,
@@ -652,7 +812,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   async consultarModalidadesComprobante(
     @Body() dto: ComprobantesModalidadConsultarDto,
   ): Promise<ResponseDto<ModalidadResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
+    const homologacion = dto.homologacion ?? false;
     const result = await this.afipService.consultarModalidadesComprobante(
       dto.cuitEmisor,
       dto.certificado,
@@ -660,14 +820,19 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
       homologacion,
     );
 
-    return new ResponseDto(result as ModalidadResponseDto, 'Modalidades obtenidas exitosamente');
+    return new ResponseDto(
+      result as ModalidadResponseDto,
+      'Modalidades obtenidas exitosamente',
+    );
   }
 
   @Post('wscdc/tipos-comprobante')
+  @Billable()
   @Auditory('Consultar tipos de comprobante WSCDC')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Consultar tipos de comprobante',
-    description: 'Obtiene los tipos de comprobante disponibles con sus códigos y descripciones'
+    description:
+      'Obtiene los tipos de comprobante disponibles con sus códigos y descripciones',
   })
   @ApiResponse({
     status: 200,
@@ -677,7 +842,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   async consultarTiposComprobanteWscdc(
     @Body() dto: ComprobantesTipoConsultarDto,
   ): Promise<ResponseDto<TipoComprobanteWscdcResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
+    const homologacion = dto.homologacion ?? false;
     const result = await this.afipService.consultarTiposComprobanteWscdc(
       dto.cuitEmisor,
       dto.certificado,
@@ -685,14 +850,18 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
       homologacion,
     );
 
-    return new ResponseDto(result as TipoComprobanteWscdcResponseDto, 'Tipos de comprobante obtenidos exitosamente');
+    return new ResponseDto(
+      result as TipoComprobanteWscdcResponseDto,
+      'Tipos de comprobante obtenidos exitosamente',
+    );
   }
 
   @Post('wscdc/tipos-documento')
+  @Billable()
   @Auditory('Consultar tipos de documento WSCDC')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Consultar tipos de documento',
-    description: 'Obtiene los tipos de documento disponibles (CUIT, DNI, etc.)'
+    description: 'Obtiene los tipos de documento disponibles (CUIT, DNI, etc.)',
   })
   @ApiResponse({
     status: 200,
@@ -702,7 +871,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   async consultarTiposDocumento(
     @Body() dto: DocumentosTipoConsultarDto,
   ): Promise<ResponseDto<TipoDocumentoResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
+    const homologacion = dto.homologacion ?? false;
     const result = await this.afipService.consultarTiposDocumento(
       dto.cuitEmisor,
       dto.certificado,
@@ -710,14 +879,19 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
       homologacion,
     );
 
-    return new ResponseDto(result as TipoDocumentoResponseDto, 'Tipos de documento obtenidos exitosamente');
+    return new ResponseDto(
+      result as TipoDocumentoResponseDto,
+      'Tipos de documento obtenidos exitosamente',
+    );
   }
 
   @Post('wscdc/tipos-opcionales')
+  @Billable()
   @Auditory('Consultar tipos de datos opcionales WSCDC')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Consultar tipos de datos opcionales',
-    description: 'Obtiene los tipos de datos opcionales disponibles (CBU, Alias, etc.)'
+    description:
+      'Obtiene los tipos de datos opcionales disponibles (CBU, Alias, etc.)',
   })
   @ApiResponse({
     status: 200,
@@ -727,7 +901,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   async consultarTiposOpcionales(
     @Body() dto: OpcionalesTipoConsultarDto,
   ): Promise<ResponseDto<TipoOpcionalResponseDto>> {
-    const homologacion = dto.homologacion !== undefined ? dto.homologacion : false;
+    const homologacion = dto.homologacion ?? false;
     const result = await this.afipService.consultarTiposOpcionales(
       dto.cuitEmisor,
       dto.certificado,
@@ -735,14 +909,19 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
       homologacion,
     );
 
-    return new ResponseDto(result as TipoOpcionalResponseDto, 'Tipos opcionales obtenidos exitosamente');
+    return new ResponseDto(
+      result as TipoOpcionalResponseDto,
+      'Tipos opcionales obtenidos exitosamente',
+    );
   }
 
+  @Public()
   @Get('wscdc/dummy')
   @Auditory('Comprobante Dummy WSCDC')
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Verificar funcionamiento de infraestructura',
-    description: 'Método Dummy para verificar el estado de los servidores (no requiere autenticación). Por defecto usa homologación.'
+    description:
+      'Método Dummy para verificar el estado de los servidores (no requiere autenticación). Por defecto usa homologación.',
   })
   @ApiResponse({
     status: 200,
@@ -756,10 +935,15 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
     const useHomologacion = homologacion === 'true';
     const result = await this.afipService.comprobanteDummy(useHomologacion);
 
-    return new ResponseDto(result as DummyResponseDto, 'Estado de infraestructura obtenido exitosamente');
+    return new ResponseDto(
+      result as DummyResponseDto,
+      'Estado de infraestructura obtenido exitosamente',
+    );
   }
 
-  private mapCommerceInvoiceToStandard(dto: CreateCommerceInvoiceDto): CreateInvoiceDto {
+  private mapCommerceInvoiceToStandard(
+    dto: CreateCommerceInvoiceDto,
+  ): CreateInvoiceDto {
     if (!dto.items || dto.items.length === 0) {
       throw new BadRequestException('Debe enviar al menos un ítem en items');
     }
@@ -820,7 +1004,11 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
     );
     const importeTributos = this.roundCurrency(dto.importeTributos || 0);
     const importeTotal = this.roundCurrency(
-      importeNetoGravado + importeNetoNoGravado + importeExento + importeIva + importeTributos,
+      importeNetoGravado +
+        importeNetoNoGravado +
+        importeExento +
+        importeIva +
+        importeTributos,
     );
 
     return {
@@ -876,5 +1064,58 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
 
   private roundCurrency(value: number): number {
     return Math.round((value + Number.EPSILON) * 100) / 100;
+  }
+
+  private getErrorMessage(error: unknown): string {
+    if (error instanceof Error) {
+      return error.message;
+    }
+    return '';
+  }
+
+  /**
+   * Si la factura fue aprobada por AFIP (resultado === 'A') y el request viene
+   * de una API key con org resuelta, la guardamos en el historial local. Nunca
+   * bloqueamos la respuesta si falla la persistencia.
+   */
+  private async persistInvoiceIfOk(
+    req: SaasRequest,
+    request: CreateInvoiceDto,
+    response: InvoiceResponseDto,
+  ): Promise<void> {
+    if (!req.organization?.id) return;
+    if (response.resultado !== 'A' || !response.cae) return;
+
+    // Si es NC/ND con CbteAsoc, intentamos resolver la factura original local
+    // para persistir la relación (Invoice.relatedToInvoiceId).
+    let relatedToInvoiceId: string | null = null;
+    const asoc = request.comprobantesAsociados?.[0];
+    if (asoc && asoc.Tipo && asoc.PtoVta && asoc.Nro) {
+      const original = await this.invoicesService
+        .findByAfipRef({
+          organizationId: req.organization.id,
+          cuitEmisor: asoc.Cuit || request.cuitEmisor,
+          puntoVenta: asoc.PtoVta,
+          tipoComprobante: asoc.Tipo,
+          numeroComprobante: asoc.Nro,
+          homologacion: request.homologacion ?? false,
+        })
+        .catch(() => null);
+      if (original && original.organizationId === req.organization.id) {
+        relatedToInvoiceId = original.id;
+      }
+    }
+
+    try {
+      await this.invoicesService.record({
+        organizationId: req.organization.id,
+        apiKeyId: req.apiKey?.id ?? null,
+        request,
+        response,
+        relatedToInvoiceId,
+      });
+    } catch {
+      // ya se loguea dentro del service
+    }
   }
 }

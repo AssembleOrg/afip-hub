@@ -1,0 +1,32 @@
+<h1 style="margin:0 0 16px;color:#0F172A;font-size:28px;font-weight:700;letter-spacing:-0.02em;line-height:1.2;">Consumiste el {{percentUsed}}% de tu plan</h1>
+<p style="margin:0 0 24px;color:#475569;font-size:16px;line-height:1.6;">
+  Hola {{userName}}, tu organización <strong style="color:#0F172A;">{{orgName}}</strong> usó <strong>{{used}}</strong> de los <strong>{{limit}}</strong> requests del plan <strong>{{planName}}</strong> este ciclo.
+</p>
+
+<div style="padding:20px;background:#F8FAFC;border-radius:12px;margin:24px 0;">
+  <div style="display:block;width:100%;background:#E2E8F0;border-radius:100px;height:10px;overflow:hidden;margin-bottom:12px;">
+    <div style="width:{{percentUsed}}%;background:linear-gradient(90deg,{{primaryColor}} 0%,#F59E0B 100%);height:10px;border-radius:100px;"></div>
+  </div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+    <tr>
+      <td align="left" style="color:#475569;font-size:14px;">{{used}} requests</td>
+      <td align="right" style="color:#475569;font-size:14px;">{{limit}} del plan</td>
+    </tr>
+  </table>
+</div>
+
+<p style="margin:0 0 24px;color:#475569;font-size:15px;line-height:1.6;">
+  El ciclo actual reinicia el <strong>{{periodEnd}}</strong>. Si necesitás más capacidad, podés subir de plan ahora mismo sin esperar.
+</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0;">
+  <tr>
+    <td align="center" style="background:{{primaryColor}};border-radius:10px;">
+      <a href="{{dashboardUrl}}/billing/plans" style="display:inline-block;padding:14px 32px;background:{{primaryColor}};color:#FFFFFF;font-size:16px;font-weight:600;text-decoration:none;border-radius:10px;">Ver planes disponibles</a>
+    </td>
+  </tr>
+</table>
+
+<p style="margin:24px 0 0;color:#64748B;font-size:13px;line-height:1.5;">
+  Cuando llegues al 100%, los requests excedentes entrarán en el 2% de gracia. Si agotás también la gracia, se bloquearán hasta renovar el ciclo o subir de plan.
+</p>
