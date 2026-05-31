@@ -108,7 +108,7 @@ export class InvoicePdfService implements OnModuleDestroy {
           items: [
             {
               codigo: '001',
-              descripcion: 'Servicios profesionales',
+              descripcion: batchDto.itemDescripcion ?? 'Venta',
               cantidad: 1,
               precioUnitario: factura.importeTotal,
               subtotal: factura.importeTotal,

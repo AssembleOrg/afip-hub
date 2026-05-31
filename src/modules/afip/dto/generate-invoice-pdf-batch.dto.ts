@@ -1,8 +1,9 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsArray,
   IsNotEmpty,
   IsNumber,
+  IsOptional,
   IsString,
   Min,
   ValidateNested,
@@ -58,4 +59,13 @@ export class GenerateInvoicePdfBatchDto {
   @ValidateNested({ each: true })
   @Type(() => InvoicePdfBatchItemDto)
   facturas: InvoicePdfBatchItemDto[];
+
+  @ApiPropertyOptional({
+    description: 'Descripción del ítem que aparece en cada factura del lote. Default: "Venta".',
+    example: 'Venta',
+    default: 'Venta',
+  })
+  @IsOptional()
+  @IsString()
+  itemDescripcion?: string;
 }

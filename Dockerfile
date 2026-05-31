@@ -4,7 +4,7 @@ FROM node:20-alpine AS base
 # Install pnpm and OpenSSL (required for Prisma)
 RUN apk add --no-cache openssl && \
     corepack enable && \
-    corepack prepare pnpm@latest --activate
+    corepack prepare pnpm@10.10.0 --activate
 
 # Set working directory
 WORKDIR /app
@@ -44,7 +44,7 @@ COPY pnpm-lock.yaml* ./
 
 # Install pnpm and production dependencies
 RUN corepack enable && \
-    corepack prepare pnpm@latest --activate && \
+    corepack prepare pnpm@10.10.0 --activate && \
     pnpm install --frozen-lockfile --prod
 
 # Copy Prisma schema and config (needed for runtime)
