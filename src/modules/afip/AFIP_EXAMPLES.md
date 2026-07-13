@@ -189,3 +189,57 @@ Una vez que tienes el ticket, lo usas así en las llamadas SOAP a otros servicio
 
 El token y sign del ticket se incluyen en los headers SOAP de cada llamada a los servicios de AFIP.
 
+
+## Ventanilla Electrónica (WSCCOMU)
+
+Consulta las comunicaciones del Domicilio Fiscal Electrónico de un contribuyente.
+
+**Requisito previo (una sola vez por CUIT):** el contribuyente debe autorizar el
+webservice al computador fiscal del certificado, con clave fiscal:
+*Administrador de Relaciones de Clave Fiscal → Nueva Relación →
+"Consumir Comunicaciones de Ventanilla Electrónica (WSCCOMU)" → alias del certificado.*
+Sin ese paso WSAA rechaza el ticket para el servicio `veconsumer`.
+
+**Limitaciones del servicio (impuestas por ARCA):**
+- Solo comunicaciones de los últimos 360 días.
+- No devuelve comunicaciones "internas de AFIP" (subservicio `e-ventanilla-int-2`);
+  usar `POST /afip/ve/sistemas-publicadores` para ver qué sistemas sí publican por WS.
+
+### Listar comunicaciones
+
+```bash
+curl -X POST http://localhost:3000/afip/ve/comunicaciones \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cuitRepresentada": "20111111112",
+    "certificado": "-----BEGIN CERTIFICATE-----...",
+    "clavePrivada": "-----BEGIN PRIVATE KEY-----...",
+    "homologacion": false,
+    "filtros": { "estado": 1, "fechaDesde": "2026-01-01" },
+    "pagina": 1,
+    "itemsPorPagina": 20
+  }'
+```
+
+### Leer una comunicación (con adjuntos)
+
+```bash
+curl -X POST http://localhost:3000/afip/ve/comunicacion \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cuitRepresentada": "20111111112",
+    "certificado": "...",
+    "clavePrivada": "...",
+    "idComunicacion": 12345678,
+    "incluirAdjuntos": true,
+    "homologacion": false
+  }'
+```
+
+### Sistemas publicadores visibles por WS
+
+```bash
+curl -X POST http://localhost:3000/afip/ve/sistemas-publicadores \
+  -H "Content-Type: application/json" \
+  -d '{ "cuitRepresentada": "20111111112", "certificado": "...", "clavePrivada": "...", "homologacion": false }'
+```
