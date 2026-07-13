@@ -70,6 +70,23 @@ export class AfipService implements OnModuleInit {
     },
   };
 
+  // WSCCOMU (Ventanilla Electrónica): el nombre de servicio para el TRA de WSAA
+  // es 'veconsumer' (no 'veconsumerws', que devuelve "servicio inexistente")
+  private static readonly VE_WSAA_SERVICE = 'veconsumer';
+
+  // El WSDL de veconsumer solo publica binding SOAP 1.2
+  private static readonly VE_SOAP_OPTIONS: soap.IOptions = {
+    forceSoap12Headers: true,
+    wsdl_options: { timeout: 30000 },
+  };
+
+  // fechaDesde es obligatorio en el filter; AFIP solo permite consultar hasta 360 días atrás
+  private getVeFechaDesdeDefault(): string {
+    const d = new Date();
+    d.setDate(d.getDate() - 359);
+    return d.toISOString().slice(0, 10);
+  }
+
   constructor(private configService: ConfigService) {
     this.wsaaUrl = this.configService.get<string>('afip.wsaaUrl') || '';
     const configuredPath = this.configService.get<string>('afip.ticketCachePath') || '';
@@ -2034,55 +2051,50 @@ export class AfipService implements OnModuleInit {
       this.logger.log(`Filtros: ${JSON.stringify(filtros)}`);
     }
 
-    // Obtener ticket para el servicio veconsumerws
-    const ticket = await this.getTicket('veconsumerws', certificado, clavePrivada, homologacion);
-    
+    const ticket = await this.getTicket(AfipService.VE_WSAA_SERVICE, certificado, clavePrivada, homologacion);
+
     const urls = this.getAfipUrls(homologacion);
     const ventanillaUrl = urls.ventanilla;
 
     return new Promise((resolve, reject) => {
-      soap.createClient(ventanillaUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
+      soap.createClient(ventanillaUrl, AfipService.VE_SOAP_OPTIONS, (err, client) => {
         if (err) {
           this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
           reject(new BadRequestException(`Error al crear cliente SOAP Ventanilla Electrónica: ${err.message}`));
           return;
         }
 
-        // Construir el request según la especificación del PDF
+        // El WSDL exige filter con fechaDesde (antigüedad máxima consultable: 360 días)
+        // y la paginación viaja dentro de filter (pagina / resultadosPorPagina).
+        // Las claves se agregan en el orden del WSDL: node-soap serializa según orden de inserción.
+        const filter: any = {};
+        if (filtros?.estado !== undefined) {
+          filter.estado = filtros.estado;
+        }
+        filter.fechaDesde = filtros?.fechaDesde || this.getVeFechaDesdeDefault();
+        if (filtros?.fechaHasta) {
+          filter.fechaHasta = filtros.fechaHasta;
+        }
+        if (filtros?.idComunicacionDesde !== undefined) {
+          filter.comunicacionIdDesde = filtros.idComunicacionDesde;
+        }
+        if (filtros?.idComunicacionHasta !== undefined) {
+          filter.comunicacionIdHasta = filtros.idComunicacionHasta;
+        }
+        if (filtros?.idSistemaPublicador !== undefined) {
+          filter.sistemaPublicadorId = filtros.idSistemaPublicador;
+        }
+        filter.pagina = pagina;
+        filter.resultadosPorPagina = itemsPorPagina;
+
         const request: any = {
           authRequest: {
             token: ticket.token,
             sign: ticket.sign,
             cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
           },
-          pagina: pagina,
-          itemsPorPagina: itemsPorPagina,
+          filter,
         };
-
-        // Agregar filtros si existen
-        if (filtros) {
-          request.filter = {};
-          
-          if (filtros.estado !== undefined) {
-            request.filter.estado = filtros.estado;
-          }
-          if (filtros.fechaDesde) {
-            // Formato esperado: yyyy-MM-dd
-            request.filter.fechaDesde = filtros.fechaDesde;
-          }
-          if (filtros.fechaHasta) {
-            request.filter.fechaHasta = filtros.fechaHasta;
-          }
-          if (filtros.idSistemaPublicador !== undefined) {
-            request.filter.idSistemaPublicador = filtros.idSistemaPublicador;
-          }
-          if (filtros.idComunicacionDesde !== undefined) {
-            request.filter.idComunicacionDesde = filtros.idComunicacionDesde;
-          }
-          if (filtros.idComunicacionHasta !== undefined) {
-            request.filter.idComunicacionHasta = filtros.idComunicacionHasta;
-          }
-        }
 
         this.logger.log('Request a VE: ' + JSON.stringify(request, null, 2));
 
@@ -2189,13 +2201,13 @@ export class AfipService implements OnModuleInit {
     this.logger.log(`Incluir Adjuntos: ${incluirAdjuntos}`);
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
-    const ticket = await this.getTicket('veconsumerws', certificado, clavePrivada, homologacion);
-    
+    const ticket = await this.getTicket(AfipService.VE_WSAA_SERVICE, certificado, clavePrivada, homologacion);
+
     const urls = this.getAfipUrls(homologacion);
     const ventanillaUrl = urls.ventanilla;
 
     return new Promise((resolve, reject) => {
-      soap.createClient(ventanillaUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
+      soap.createClient(ventanillaUrl, AfipService.VE_SOAP_OPTIONS, (err, client) => {
         if (err) {
           this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
           reject(new BadRequestException(`Error al crear cliente SOAP Ventanilla Electrónica: ${err.message}`));
@@ -2209,6 +2221,7 @@ export class AfipService implements OnModuleInit {
             cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
           },
           idComunicacion: idComunicacion,
+          incluirAdjuntos: incluirAdjuntos,
         };
 
         this.logger.log('Request a VE consumirComunicacion: ' + JSON.stringify(request, null, 2));
@@ -2234,12 +2247,17 @@ export class AfipService implements OnModuleInit {
                 ? comunicacion.adjuntos.adjunto 
                 : [comunicacion.adjuntos.adjunto];
               
-              adjuntos = adjuntosData.map((adj: any) => ({
-                nombre: adj.nombre || adj.fileName || '',
-                tipoMime: adj.tipoMime || adj.mimeType || 'application/octet-stream',
-                contenidoBase64: incluirAdjuntos ? (adj.contenido || adj.content || '') : undefined,
-                tamanio: adj.tamanio ? Number(adj.tamanio) : undefined,
-              }));
+              adjuntos = adjuntosData.map((adj: any) => {
+                const rawContent = adj.content || adj.contenido;
+                return {
+                  nombre: adj.filename || adj.nombre || adj.fileName || '',
+                  tipoMime: adj.tipoMime || adj.mimeType || 'application/octet-stream',
+                  contenidoBase64: incluirAdjuntos && rawContent
+                    ? (Buffer.isBuffer(rawContent) ? rawContent.toString('base64') : String(rawContent))
+                    : undefined,
+                  tamanio: adj.contentSize ? Number(adj.contentSize) : (adj.tamanio ? Number(adj.tamanio) : undefined),
+                };
+              });
             }
 
             const response = {
@@ -2291,13 +2309,13 @@ export class AfipService implements OnModuleInit {
     this.logger.log(`CUIT Representada: ${cuitRepresentada}`);
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
-    const ticket = await this.getTicket('veconsumerws', certificado, clavePrivada, homologacion);
-    
+    const ticket = await this.getTicket(AfipService.VE_WSAA_SERVICE, certificado, clavePrivada, homologacion);
+
     const urls = this.getAfipUrls(homologacion);
     const ventanillaUrl = urls.ventanilla;
 
     return new Promise((resolve, reject) => {
-      soap.createClient(ventanillaUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
+      soap.createClient(ventanillaUrl, AfipService.VE_SOAP_OPTIONS, (err, client) => {
         if (err) {
           this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
           reject(new BadRequestException(`Error al crear cliente SOAP VE: ${err.message}`));
@@ -2332,7 +2350,7 @@ export class AfipService implements OnModuleInit {
             const response = sistemasArray.map((s: any) => ({
               id: Number(s.id),
               descripcion: s.descripcion || '',
-              certCN: s.certCN || undefined,
+              certCN: s.certCNs || s.certCN || undefined,
               subservicios: s.subservicios?.subservicio || undefined,
             }));
 
@@ -2363,13 +2381,13 @@ export class AfipService implements OnModuleInit {
     this.logger.log(`CUIT Representada: ${cuitRepresentada}`);
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
-    const ticket = await this.getTicket('veconsumerws', certificado, clavePrivada, homologacion);
-    
+    const ticket = await this.getTicket(AfipService.VE_WSAA_SERVICE, certificado, clavePrivada, homologacion);
+
     const urls = this.getAfipUrls(homologacion);
     const ventanillaUrl = urls.ventanilla;
 
     return new Promise((resolve, reject) => {
-      soap.createClient(ventanillaUrl, { wsdl_options: { timeout: 30000 } }, (err, client) => {
+      soap.createClient(ventanillaUrl, AfipService.VE_SOAP_OPTIONS, (err, client) => {
         if (err) {
           this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
           reject(new BadRequestException(`Error al crear cliente SOAP VE: ${err.message}`));
