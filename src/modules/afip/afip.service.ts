@@ -2048,41 +2048,45 @@ export class AfipService implements OnModuleInit {
           return;
         }
 
-        // Construir el request según la especificación del PDF
+        // Construir el request según el WSDL de WSCCOMU. La raíz de
+        // RequestConsultarComunicaciones sólo admite <authRequest> y <filter>;
+        // la paginación (pagina / resultadosPorPagina) va DENTRO de <filter>,
+        // no como elementos sueltos en la raíz. Los elementos de <filter>
+        // deben respetar el orden del <xs:sequence name="Filter">:
+        // estado, fechaDesde, fechaHasta, comunicacionIdDesde,
+        // comunicacionIdHasta, tieneAdjunto, sistemaPublicadorId,
+        // pagina, resultadosPorPagina.
+        const filter: any = {};
+        if (filtros?.estado !== undefined) {
+          filter.estado = filtros.estado;
+        }
+        if (filtros?.fechaDesde) {
+          // Formato esperado: yyyy-MM-dd
+          filter.fechaDesde = filtros.fechaDesde;
+        }
+        if (filtros?.fechaHasta) {
+          filter.fechaHasta = filtros.fechaHasta;
+        }
+        if (filtros?.idComunicacionDesde !== undefined) {
+          filter.comunicacionIdDesde = filtros.idComunicacionDesde;
+        }
+        if (filtros?.idComunicacionHasta !== undefined) {
+          filter.comunicacionIdHasta = filtros.idComunicacionHasta;
+        }
+        if (filtros?.idSistemaPublicador !== undefined) {
+          filter.sistemaPublicadorId = filtros.idSistemaPublicador;
+        }
+        filter.pagina = pagina;
+        filter.resultadosPorPagina = itemsPorPagina;
+
         const request: any = {
           authRequest: {
             token: ticket.token,
             sign: ticket.sign,
             cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
           },
-          pagina: pagina,
-          itemsPorPagina: itemsPorPagina,
+          filter,
         };
-
-        // Agregar filtros si existen
-        if (filtros) {
-          request.filter = {};
-          
-          if (filtros.estado !== undefined) {
-            request.filter.estado = filtros.estado;
-          }
-          if (filtros.fechaDesde) {
-            // Formato esperado: yyyy-MM-dd
-            request.filter.fechaDesde = filtros.fechaDesde;
-          }
-          if (filtros.fechaHasta) {
-            request.filter.fechaHasta = filtros.fechaHasta;
-          }
-          if (filtros.idSistemaPublicador !== undefined) {
-            request.filter.idSistemaPublicador = filtros.idSistemaPublicador;
-          }
-          if (filtros.idComunicacionDesde !== undefined) {
-            request.filter.idComunicacionDesde = filtros.idComunicacionDesde;
-          }
-          if (filtros.idComunicacionHasta !== undefined) {
-            request.filter.idComunicacionHasta = filtros.idComunicacionHasta;
-          }
-        }
 
         this.logger.log('Request a VE: ' + JSON.stringify(request, null, 2));
 
@@ -2101,7 +2105,14 @@ export class AfipService implements OnModuleInit {
                                      result?.RespuestaPaginada || 
                                      result;
 
-            const items = respuestaPaginada?.items?.item || respuestaPaginada?.items || [];
+            // Según el WSDL, RespuestaPaginada.items es de tipo Items y sus
+            // hijos son <ComunicacionSimplificada> (no <item>). node-soap los
+            // expone bajo esa key. Contemplamos variantes por robustez.
+            const items =
+              respuestaPaginada?.items?.ComunicacionSimplificada ??
+              respuestaPaginada?.items?.item ??
+              respuestaPaginada?.items ??
+              [];
             const comunicacionesArray = Array.isArray(items) ? items : (items ? [items] : []);
 
             // Mapear las comunicaciones al formato de respuesta
