@@ -2056,99 +2056,122 @@ export class AfipService implements OnModuleInit {
         // estado, fechaDesde, fechaHasta, comunicacionIdDesde,
         // comunicacionIdHasta, tieneAdjunto, sistemaPublicadorId,
         // pagina, resultadosPorPagina.
-        const filter: any = {};
-        if (filtros?.estado !== undefined) {
-          filter.estado = filtros.estado;
-        }
-        if (filtros?.fechaDesde) {
-          // Formato esperado: yyyy-MM-dd
-          filter.fechaDesde = filtros.fechaDesde;
-        }
-        if (filtros?.fechaHasta) {
-          filter.fechaHasta = filtros.fechaHasta;
-        }
-        if (filtros?.idComunicacionDesde !== undefined) {
-          filter.comunicacionIdDesde = filtros.idComunicacionDesde;
-        }
-        if (filtros?.idComunicacionHasta !== undefined) {
-          filter.comunicacionIdHasta = filtros.idComunicacionHasta;
-        }
-        if (filtros?.idSistemaPublicador !== undefined) {
-          filter.sistemaPublicadorId = filtros.idSistemaPublicador;
-        }
-        filter.pagina = pagina;
-        filter.resultadosPorPagina = itemsPorPagina;
+        const buildRequest = (fechaDesdeEfectiva?: string) => {
+          const filter: any = {};
+          if (filtros?.estado !== undefined) {
+            filter.estado = filtros.estado;
+          }
+          if (fechaDesdeEfectiva) {
+            // Formato esperado: yyyy-MM-dd
+            filter.fechaDesde = fechaDesdeEfectiva;
+          }
+          if (filtros?.fechaHasta) {
+            filter.fechaHasta = filtros.fechaHasta;
+          }
+          if (filtros?.idComunicacionDesde !== undefined) {
+            filter.comunicacionIdDesde = filtros.idComunicacionDesde;
+          }
+          if (filtros?.idComunicacionHasta !== undefined) {
+            filter.comunicacionIdHasta = filtros.idComunicacionHasta;
+          }
+          if (filtros?.idSistemaPublicador !== undefined) {
+            filter.sistemaPublicadorId = filtros.idSistemaPublicador;
+          }
+          filter.pagina = pagina;
+          filter.resultadosPorPagina = itemsPorPagina;
 
-        const request: any = {
-          authRequest: {
-            token: ticket.token,
-            sign: ticket.sign,
-            cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
-          },
-          filter,
+          return {
+            authRequest: {
+              token: ticket.token,
+              sign: ticket.sign,
+              cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
+            },
+            filter,
+          };
         };
 
-        this.logger.log('Request a VE: ' + JSON.stringify(request, null, 2));
+        const procesarRespuesta = (result: any) => {
+          // Parsear respuesta según estructura del PDF
+          const respuestaPaginada =
+            result?.consultarComunicacionesResponse?.RespuestaPaginada ||
+            result?.RespuestaPaginada ||
+            result;
 
-        client.consultarComunicaciones(request, (err: any, result: any) => {
-          if (err) {
-            this.logger.error(`Error en consultarComunicaciones: ${err.message}`);
-            reject(new BadRequestException(`Error al consultar comunicaciones: ${err.message}`));
-            return;
-          }
+          // Según el WSDL, RespuestaPaginada.items es de tipo Items y sus
+          // hijos son <ComunicacionSimplificada> (no <item>). node-soap los
+          // expone bajo esa key. Contemplamos variantes por robustez.
+          const items =
+            respuestaPaginada?.items?.ComunicacionSimplificada ??
+            respuestaPaginada?.items?.item ??
+            respuestaPaginada?.items ??
+            [];
+          const comunicacionesArray = Array.isArray(items) ? items : (items ? [items] : []);
 
-          try {
-            this.logger.log('Respuesta recibida de VE');
-            
-            // Parsear respuesta según estructura del PDF
-            const respuestaPaginada = result?.consultarComunicacionesResponse?.RespuestaPaginada || 
-                                     result?.RespuestaPaginada || 
-                                     result;
+          const comunicaciones = comunicacionesArray.map((c: any) => ({
+            idComunicacion: Number(c.idComunicacion || c.id),
+            cuitDestinatario: String(c.cuitDestinatario || cuitRepresentada),
+            fechaPublicacion: c.fechaPublicacion || '',
+            fechaVencimiento: c.fechaVencimiento || undefined,
+            sistemaPublicador: Number(c.sistemaPublicador || c.idSistemaPublicador || 0),
+            sistemaPublicadorDesc: c.sistemaPublicadorDesc || c.descSistemaPublicador || '',
+            estado: Number(c.estado || 1),
+            estadoDesc: c.estadoDesc || this.getEstadoDescripcion(Number(c.estado || 1)),
+            asunto: c.asunto || '',
+            prioridad: c.prioridad ? Number(c.prioridad) : undefined,
+            tieneAdjunto: c.tieneAdjunto === true || c.tieneAdjunto === 'true' || c.tieneAdjunto === 1,
+            referencia1: c.referencia1 || undefined,
+            referencia2: c.referencia2 || undefined,
+          }));
 
-            // Según el WSDL, RespuestaPaginada.items es de tipo Items y sus
-            // hijos son <ComunicacionSimplificada> (no <item>). node-soap los
-            // expone bajo esa key. Contemplamos variantes por robustez.
-            const items =
-              respuestaPaginada?.items?.ComunicacionSimplificada ??
-              respuestaPaginada?.items?.item ??
-              respuestaPaginada?.items ??
-              [];
-            const comunicacionesArray = Array.isArray(items) ? items : (items ? [items] : []);
+          return {
+            paginacion: {
+              pagina: Number(respuestaPaginada?.pagina || pagina),
+              totalPaginas: Number(respuestaPaginada?.totalPaginas || 1),
+              itemsPorPagina: Number(respuestaPaginada?.itemsPorPagina || itemsPorPagina),
+              totalItems: Number(respuestaPaginada?.totalItems || comunicaciones.length),
+            },
+            comunicaciones,
+          };
+        };
 
-            // Mapear las comunicaciones al formato de respuesta
-            const comunicaciones = comunicacionesArray.map((c: any) => ({
-              idComunicacion: Number(c.idComunicacion || c.id),
-              cuitDestinatario: String(c.cuitDestinatario || cuitRepresentada),
-              fechaPublicacion: c.fechaPublicacion || '',
-              fechaVencimiento: c.fechaVencimiento || undefined,
-              sistemaPublicador: Number(c.sistemaPublicador || c.idSistemaPublicador || 0),
-              sistemaPublicadorDesc: c.sistemaPublicadorDesc || c.descSistemaPublicador || '',
-              estado: Number(c.estado || 1),
-              estadoDesc: c.estadoDesc || this.getEstadoDescripcion(Number(c.estado || 1)),
-              asunto: c.asunto || '',
-              prioridad: c.prioridad ? Number(c.prioridad) : undefined,
-              tieneAdjunto: c.tieneAdjunto === true || c.tieneAdjunto === 'true' || c.tieneAdjunto === 1,
-              referencia1: c.referencia1 || undefined,
-              referencia2: c.referencia2 || undefined,
-            }));
+        // WSCCOMU sólo expone comunicaciones desde una fecha mínima. Si el
+        // caller no pasó fechaDesde (o pasó una anterior al piso), AFIP rechaza
+        // con "Error 101: Fecha desde no soportada. Mínima fecha [YYYY-MM-DD]".
+        // Reintentamos UNA vez con esa fecha exacta: así no hay que hardcodear
+        // el piso y se autoajusta si la ventana avanza.
+        const ejecutar = (fechaDesdeEfectiva: string | undefined, esReintento: boolean) => {
+          const request = buildRequest(fechaDesdeEfectiva);
+          this.logger.log('Request a VE: ' + JSON.stringify(request, null, 2));
 
-            const response = {
-              paginacion: {
-                pagina: Number(respuestaPaginada?.pagina || pagina),
-                totalPaginas: Number(respuestaPaginada?.totalPaginas || 1),
-                itemsPorPagina: Number(respuestaPaginada?.itemsPorPagina || itemsPorPagina),
-                totalItems: Number(respuestaPaginada?.totalItems || comunicaciones.length),
-              },
-              comunicaciones,
-            };
+          client.consultarComunicaciones(request, (err: any, result: any) => {
+            if (err) {
+              const msg = err.message || '';
+              const min = msg.match(/M[ií]nima fecha\s*\[(\d{4}-\d{2}-\d{2})\]/);
+              if (min && !esReintento) {
+                this.logger.warn(
+                  `AFIP exige fechaDesde >= ${min[1]}; reintentando con esa fecha`,
+                );
+                ejecutar(min[1], true);
+                return;
+              }
+              this.logger.error(`Error en consultarComunicaciones: ${msg}`);
+              reject(new BadRequestException(`Error al consultar comunicaciones: ${msg}`));
+              return;
+            }
 
-            this.logger.log(`Comunicaciones encontradas: ${response.paginacion.totalItems}`);
-            resolve(response);
-          } catch (parseError: any) {
-            this.logger.error(`Error al parsear respuesta VE: ${parseError.message}`);
-            reject(new BadRequestException(`Error al procesar respuesta de Ventanilla Electrónica: ${parseError.message}`));
-          }
-        });
+            try {
+              this.logger.log('Respuesta recibida de VE');
+              const response = procesarRespuesta(result);
+              this.logger.log(`Comunicaciones encontradas: ${response.paginacion.totalItems}`);
+              resolve(response);
+            } catch (parseError: any) {
+              this.logger.error(`Error al parsear respuesta VE: ${parseError.message}`);
+              reject(new BadRequestException(`Error al procesar respuesta de Ventanilla Electrónica: ${parseError.message}`));
+            }
+          });
+        };
+
+        ejecutar(filtros?.fechaDesde, false);
       });
     });
   }
