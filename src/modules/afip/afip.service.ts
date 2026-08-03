@@ -2236,6 +2236,7 @@ export class AfipService implements OnModuleInit {
           return;
         }
 
+        // RequestConsumirComunicacion = { authRequest, idComunicacion, incluirAdjuntos? }
         const request: any = {
           authRequest: {
             token: ticket.token,
@@ -2243,6 +2244,7 @@ export class AfipService implements OnModuleInit {
             cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
           },
           idComunicacion: idComunicacion,
+          incluirAdjuntos: incluirAdjuntos,
         };
 
         this.logger.log('Request a VE consumirComunicacion: ' + JSON.stringify(request, null, 2));
