@@ -2285,27 +2285,23 @@ export class AfipService implements OnModuleInit {
                 )
                 .filter(Boolean);
 
-              let rawMultipart: Buffer | null = null;
-              if (incluirAdjuntos && hrefsPend.length > 0) {
-                const endpoint = ventanillaUrl.replace(/\?wsdl$/i, '');
-                const reqCt =
-                  (client as any).lastRequestHeaders?.['Content-Type'] ??
-                  (client as any).lastRequestHeaders?.['content-type'];
-                rawMultipart = await this.fetchMtomMultipart(
-                  endpoint,
-                  (client as any).lastRequest,
-                  reqCt,
-                );
-              }
-
               // Partes binarias del multipart crudo (excluye la raíz xop+xml).
               // OJO: los Content-ID del re-fetch NO coinciden con los que parseó
               // node-soap (es otra request; CXF genera un cid nuevo por respuesta),
               // así que NO se puede matchear por cid entre requests: mapeamos las
               // partes binarias por POSICIÓN a los adjuntos que traen xop:Include.
-              const binaryParts: Buffer[] = Buffer.isBuffer(rawMultipart)
-                ? this.parseMtomBinaryParts(rawMultipart)
-                : [];
+              let binaryParts: Buffer[] = [];
+              if (incluirAdjuntos && hrefsPend.length > 0) {
+                const endpoint = ventanillaUrl.replace(/\?wsdl$/i, '');
+                const reqCt =
+                  (client as any).lastRequestHeaders?.['Content-Type'] ??
+                  (client as any).lastRequestHeaders?.['content-type'];
+                binaryParts = await this.fetchMtomBinaryParts(
+                  endpoint,
+                  (client as any).lastRequest,
+                  reqCt,
+                );
+              }
               this.logger.log(
                 `MTOM binaryParts=${binaryParts.length} sizes=[${binaryParts
                   .map((b) => b.length)
@@ -2387,12 +2383,12 @@ export class AfipService implements OnModuleInit {
    * axios (responseType arraybuffer) y devolvemos el multipart/related completo
    * (byte-exacto) para poder extraer los adjuntos. Devuelve null si falla.
    */
-  private async fetchMtomMultipart(
+  private async fetchMtomBinaryParts(
     endpoint: string,
     envelope: string,
     contentType?: string,
-  ): Promise<Buffer | null> {
-    if (!envelope) return null;
+  ): Promise<Buffer[]> {
+    if (!envelope) return [];
     try {
       const res = await axios.post(endpoint, envelope, {
         headers: {
@@ -2403,13 +2399,17 @@ export class AfipService implements OnModuleInit {
         validateStatus: () => true,
       });
       const buf = Buffer.from(res.data);
+      const respCt = String(res.headers['content-type'] ?? '');
       this.logger.log(
-        `fetchMtomMultipart: status=${res.status} ct=${res.headers['content-type']} bytes=${buf.length}`,
+        `fetchMtomMultipart: status=${res.status} ct=${respCt} bytes=${buf.length}`,
       );
-      return res.status >= 200 && res.status < 300 ? buf : null;
+      if (res.status < 200 || res.status >= 300) return [];
+      // El boundary confiable viene del header de la respuesta, no del body.
+      const m = /boundary="?([^";]+)"?/i.exec(respCt);
+      return this.parseMtomBinaryParts(buf, m ? m[1] : undefined);
     } catch (e: any) {
       this.logger.error(`fetchMtomMultipart error: ${e?.message ?? e}`);
-      return null;
+      return [];
     }
   }
 
@@ -2418,12 +2418,19 @@ export class AfipService implements OnModuleInit {
    * en orden, EXCLUYENDO la parte raíz `application/xop+xml` (el sobre SOAP).
    * Se trabaja en `latin1` para ubicar delimitadores/headers byte-exacto y luego
    * se recortan los cuerpos sobre el Buffer original (sin corromper el binario).
+   * `boundary` viene del header Content-Type de la respuesta; si falta, se cae a
+   * detectarlo desde la primera línea del cuerpo.
    */
-  private parseMtomBinaryParts(raw: Buffer): Buffer[] {
+  private parseMtomBinaryParts(raw: Buffer, boundary?: string): Buffer[] {
     const s = raw.toString('latin1');
-    const firstCrlf = s.indexOf('\r\n');
-    if (firstCrlf === -1) return [];
-    const delim = s.slice(0, firstCrlf).trim(); // "--<boundary>"
+    let delim: string;
+    if (boundary) {
+      delim = '--' + boundary;
+    } else {
+      const firstCrlf = s.indexOf('\r\n');
+      if (firstCrlf === -1) return [];
+      delim = s.slice(0, firstCrlf).trim(); // "--<boundary>"
+    }
     if (!delim.startsWith('--')) return [];
 
     // Posiciones de cada delimitador de parte.
@@ -2433,6 +2440,9 @@ export class AfipService implements OnModuleInit {
       positions.push(p);
       p = s.indexOf(delim, p + delim.length);
     }
+    this.logger.log(
+      `parseMtomBinaryParts: delim="${delim.slice(0, 24)}..." delims=${positions.length}`,
+    );
 
     const parts: Buffer[] = [];
     for (let i = 0; i < positions.length - 1; i++) {
