@@ -1,6 +1,7 @@
 import { Injectable, BadRequestException, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as soap from 'soap';
+import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
@@ -2249,7 +2250,7 @@ export class AfipService implements OnModuleInit {
 
         this.logger.log('Request a VE consumirComunicacion: ' + JSON.stringify(request, null, 2));
 
-        client.consumirComunicacion(request, (err: any, result: any) => {
+        client.consumirComunicacion(request, async (err: any, result: any) => {
           if (err) {
             this.logger.error(`Error en consumirComunicacion: ${err.message}`);
             reject(new BadRequestException(`Error al consumir comunicación: ${err.message}`));
@@ -2272,56 +2273,37 @@ export class AfipService implements OnModuleInit {
                 : [comunicacion.adjuntos.adjunto];
 
               // content viene como referencia XOP/MTOM { Include: { href } }.
-              // El binario está en una parte MIME aparte (multipart/related),
-              // pero node-soap v1.6 NO la expone en lastResponseAttachments
-              // (0 partes), así que lo recuperamos del cuerpo crudo
-              // (client.lastResponse) si vino como Buffer (byte-exacto).
-              const att: any = (client as any).lastResponseAttachments;
-              const partes: any[] = Array.isArray(att?.parts)
-                ? att.parts
-                : Array.isArray(att)
-                  ? att
-                  : [];
-              const lastResp: any = (client as any).lastResponse;
-              const hdrs: any = (client as any).lastResponseHeaders;
-              const ct = hdrs?.['content-type'] ?? hdrs?.['Content-Type'];
-              this.logger.log(
-                `MTOM diag: partes=${partes.length}` +
-                  ` | attKeys=${att ? JSON.stringify(Object.keys(att)) : 'undef'}` +
-                  ` | content-type=${JSON.stringify(ct)}` +
-                  ` | lastResponse=${Buffer.isBuffer(lastResp) ? 'Buffer:' + lastResp.length : typeof lastResp + ':' + (typeof lastResp === 'string' ? lastResp.length : 0)}`,
-              );
-              if (typeof lastResp === 'string') {
-                this.logger.log(
-                  'lastResponse head: ' +
-                    lastResp.slice(0, 180).replace(/[\r\n]+/g, ' '),
+              // node-soap v1.6 descarta la parte MIME con el binario (queda solo
+              // el XML en lastResponse), así que re-pedimos la respuesta cruda
+              // (arraybuffer) reusando el envelope que armó node-soap y parseamos
+              // el multipart/related nosotros.
+              const hrefsPend: string[] = adjuntosData
+                .map(
+                  (a: any) =>
+                    a?.content?.Include?.attributes?.href ??
+                    a?.content?.Include?.href,
+                )
+                .filter(Boolean);
+
+              let rawMultipart: Buffer | null = null;
+              if (incluirAdjuntos && hrefsPend.length > 0) {
+                const endpoint = ventanillaUrl.replace(/\?wsdl$/i, '');
+                const reqCt =
+                  (client as any).lastRequestHeaders?.['Content-Type'] ??
+                  (client as any).lastRequestHeaders?.['content-type'];
+                rawMultipart = await this.fetchMtomMultipart(
+                  endpoint,
+                  (client as any).lastRequest,
+                  reqCt,
                 );
               }
 
-              // Parte MIME por Content-ID desde lastResponseAttachments (vía A).
-              const cidBody = (href: string): Buffer | null => {
-                const id = String(href).replace(/^cid:/i, '').replace(/^<|>$/g, '');
-                for (const p of partes) {
-                  const h = p.headers ?? {};
-                  const cid = String(
-                    h['content-id'] ?? h['Content-Id'] ?? h['Content-ID'] ?? '',
-                  ).replace(/^<|>$/g, '');
-                  if (cid && (cid === id || cid.includes(id) || id.includes(cid))) {
-                    return Buffer.isBuffer(p.body) ? p.body : Buffer.from(p.body ?? '');
-                  }
-                }
-                if (partes.length === 1 && partes[0]?.body != null) {
-                  const b = partes[0].body;
-                  return Buffer.isBuffer(b) ? b : Buffer.from(b);
-                }
-                return null;
-              };
-
-              // Parte MIME por Content-ID desde el multipart crudo (vía B).
+              // Extrae el Buffer de la parte MIME cuyo Content-ID matchea el
+              // href del xop:Include, del multipart crudo (latin1 = byte-exacto).
               const cidFromRaw = (href: string): Buffer | null => {
-                if (!Buffer.isBuffer(lastResp)) return null;
+                if (!Buffer.isBuffer(rawMultipart)) return null;
                 const id = String(href).replace(/^cid:/i, '').replace(/^<|>$/g, '');
-                const s = lastResp.toString('latin1'); // byte-exacto
+                const s = rawMultipart.toString('latin1');
                 let idx = 0;
                 while ((idx = s.indexOf('Content-ID', idx)) !== -1) {
                   const lineEnd = s.indexOf('\n', idx);
@@ -2332,7 +2314,7 @@ export class AfipService implements OnModuleInit {
                     const start = sep + 4;
                     let end = s.indexOf('\r\n--', start);
                     if (end === -1) end = s.length;
-                    return lastResp.subarray(start, end);
+                    return rawMultipart.subarray(start, end);
                   }
                   idx = lineEnd;
                 }
@@ -2344,7 +2326,7 @@ export class AfipService implements OnModuleInit {
                 if (v && typeof v === 'object' && !Buffer.isBuffer(v)) {
                   const href = v.Include?.attributes?.href ?? v.Include?.href;
                   if (href) {
-                    const buf = cidBody(href) ?? cidFromRaw(href);
+                    const buf = cidFromRaw(href);
                     return buf ? buf.toString('base64') : '';
                   }
                   if (v.type === 'Buffer' && Array.isArray(v.data)) {
@@ -2403,6 +2385,38 @@ export class AfipService implements OnModuleInit {
         });
       });
     });
+  }
+
+  /**
+   * Re-pide una respuesta SOAP 1.2 / MTOM como binario crudo. node-soap descarta
+   * las partes MIME con los adjuntos, así que reenviamos el mismo envelope con
+   * axios (responseType arraybuffer) y devolvemos el multipart/related completo
+   * (byte-exacto) para poder extraer los adjuntos. Devuelve null si falla.
+   */
+  private async fetchMtomMultipart(
+    endpoint: string,
+    envelope: string,
+    contentType?: string,
+  ): Promise<Buffer | null> {
+    if (!envelope) return null;
+    try {
+      const res = await axios.post(endpoint, envelope, {
+        headers: {
+          'Content-Type': contentType || 'application/soap+xml; charset=utf-8',
+        },
+        responseType: 'arraybuffer',
+        timeout: 30000,
+        validateStatus: () => true,
+      });
+      const buf = Buffer.from(res.data);
+      this.logger.log(
+        `fetchMtomMultipart: status=${res.status} ct=${res.headers['content-type']} bytes=${buf.length}`,
+      );
+      return res.status >= 200 && res.status < 300 ? buf : null;
+    } catch (e: any) {
+      this.logger.error(`fetchMtomMultipart error: ${e?.message ?? e}`);
+      return null;
+    }
   }
 
   /**
