@@ -2298,35 +2298,29 @@ export class AfipService implements OnModuleInit {
                 );
               }
 
-              // Extrae el Buffer de la parte MIME cuyo Content-ID matchea el
-              // href del xop:Include, del multipart crudo (latin1 = byte-exacto).
-              const cidFromRaw = (href: string): Buffer | null => {
-                if (!Buffer.isBuffer(rawMultipart)) return null;
-                const id = String(href).replace(/^cid:/i, '').replace(/^<|>$/g, '');
-                const s = rawMultipart.toString('latin1');
-                let idx = 0;
-                while ((idx = s.indexOf('Content-ID', idx)) !== -1) {
-                  const lineEnd = s.indexOf('\n', idx);
-                  if (lineEnd === -1) break;
-                  if (s.slice(idx, lineEnd).includes(id)) {
-                    const sep = s.indexOf('\r\n\r\n', idx);
-                    if (sep === -1) return null;
-                    const start = sep + 4;
-                    let end = s.indexOf('\r\n--', start);
-                    if (end === -1) end = s.length;
-                    return rawMultipart.subarray(start, end);
-                  }
-                  idx = lineEnd;
-                }
-                return null;
-              };
+              // Partes binarias del multipart crudo (excluye la raíz xop+xml).
+              // OJO: los Content-ID del re-fetch NO coinciden con los que parseó
+              // node-soap (es otra request; CXF genera un cid nuevo por respuesta),
+              // así que NO se puede matchear por cid entre requests: mapeamos las
+              // partes binarias por POSICIÓN a los adjuntos que traen xop:Include.
+              const binaryParts: Buffer[] = Buffer.isBuffer(rawMultipart)
+                ? this.parseMtomBinaryParts(rawMultipart)
+                : [];
+              this.logger.log(
+                `MTOM binaryParts=${binaryParts.length} sizes=[${binaryParts
+                  .map((b) => b.length)
+                  .join(',')}] adjuntos=${adjuntosData.length}`,
+              );
 
+              // Cursor sobre las partes binarias: cada adjunto con xop:Include
+              // consume la siguiente parte en orden de aparición.
+              let xopCursor = 0;
               const extraerBase64 = (adj: any): string => {
                 let v: any = adj.content ?? adj.contenido;
                 if (v && typeof v === 'object' && !Buffer.isBuffer(v)) {
-                  const href = v.Include?.attributes?.href ?? v.Include?.href;
-                  if (href) {
-                    const buf = cidFromRaw(href);
+                  const isXop = !!(v.Include?.attributes?.href ?? v.Include?.href);
+                  if (isXop) {
+                    const buf = binaryParts[xopCursor++];
                     return buf ? buf.toString('base64') : '';
                   }
                   if (v.type === 'Buffer' && Array.isArray(v.data)) {
@@ -2417,6 +2411,48 @@ export class AfipService implements OnModuleInit {
       this.logger.error(`fetchMtomMultipart error: ${e?.message ?? e}`);
       return null;
     }
+  }
+
+  /**
+   * Parsea un multipart/related (MTOM/XOP) crudo y devuelve las partes binarias
+   * en orden, EXCLUYENDO la parte raíz `application/xop+xml` (el sobre SOAP).
+   * Se trabaja en `latin1` para ubicar delimitadores/headers byte-exacto y luego
+   * se recortan los cuerpos sobre el Buffer original (sin corromper el binario).
+   */
+  private parseMtomBinaryParts(raw: Buffer): Buffer[] {
+    const s = raw.toString('latin1');
+    const firstCrlf = s.indexOf('\r\n');
+    if (firstCrlf === -1) return [];
+    const delim = s.slice(0, firstCrlf).trim(); // "--<boundary>"
+    if (!delim.startsWith('--')) return [];
+
+    // Posiciones de cada delimitador de parte.
+    const positions: number[] = [];
+    let p = s.indexOf(delim, 0);
+    while (p !== -1) {
+      positions.push(p);
+      p = s.indexOf(delim, p + delim.length);
+    }
+
+    const parts: Buffer[] = [];
+    for (let i = 0; i < positions.length - 1; i++) {
+      let partStart = positions[i] + delim.length;
+      if (s.slice(partStart, partStart + 2) === '--') continue; // terminador
+      if (s.slice(partStart, partStart + 2) === '\r\n') partStart += 2;
+
+      const partEnd = positions[i + 1];
+      const headerEnd = s.indexOf('\r\n\r\n', partStart);
+      if (headerEnd === -1 || headerEnd >= partEnd) continue;
+
+      const headers = s.slice(partStart, headerEnd);
+      if (/application\/xop\+xml/i.test(headers)) continue; // raíz SOAP
+
+      const bodyStart = headerEnd + 4;
+      let bodyEnd = partEnd - 2; // descarta el \r\n previo al delimitador
+      if (bodyEnd < bodyStart) bodyEnd = bodyStart;
+      parts.push(raw.subarray(bodyStart, bodyEnd));
+    }
+    return parts;
   }
 
   /**
