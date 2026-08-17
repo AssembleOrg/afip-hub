@@ -2271,29 +2271,36 @@ export class AfipService implements OnModuleInit {
                 ? comunicacion.adjuntos.adjunto
                 : [comunicacion.adjuntos.adjunto];
 
-              // content viene como referencia XOP/MTOM:
-              //   { Include: { attributes: { href: "cid:...@..." } } }
-              // El binario está en una parte MIME aparte (multipart/related);
-              // node-soap las expone en client.lastResponseAttachments.
+              // content viene como referencia XOP/MTOM { Include: { href } }.
+              // El binario está en una parte MIME aparte (multipart/related),
+              // pero node-soap v1.6 NO la expone en lastResponseAttachments
+              // (0 partes), así que lo recuperamos del cuerpo crudo
+              // (client.lastResponse) si vino como Buffer (byte-exacto).
               const att: any = (client as any).lastResponseAttachments;
               const partes: any[] = Array.isArray(att?.parts)
                 ? att.parts
                 : Array.isArray(att)
                   ? att
                   : [];
+              const lastResp: any = (client as any).lastResponse;
+              const hdrs: any = (client as any).lastResponseHeaders;
+              const ct = hdrs?.['content-type'] ?? hdrs?.['Content-Type'];
               this.logger.log(
-                `MTOM attachments: ${partes.length} parte(s)` +
-                  (partes[0]
-                    ? ` | headers[0]: ${JSON.stringify(partes[0].headers ?? {})}`
-                    : ''),
+                `MTOM diag: partes=${partes.length}` +
+                  ` | attKeys=${att ? JSON.stringify(Object.keys(att)) : 'undef'}` +
+                  ` | content-type=${JSON.stringify(ct)}` +
+                  ` | lastResponse=${Buffer.isBuffer(lastResp) ? 'Buffer:' + lastResp.length : typeof lastResp + ':' + (typeof lastResp === 'string' ? lastResp.length : 0)}`,
               );
+              if (typeof lastResp === 'string') {
+                this.logger.log(
+                  'lastResponse head: ' +
+                    lastResp.slice(0, 180).replace(/[\r\n]+/g, ' '),
+                );
+              }
 
-              // Devuelve el Buffer de la parte MIME cuyo Content-ID matchea el
-              // href del xop:Include.
+              // Parte MIME por Content-ID desde lastResponseAttachments (vía A).
               const cidBody = (href: string): Buffer | null => {
-                const id = String(href)
-                  .replace(/^cid:/i, '')
-                  .replace(/^<|>$/g, '');
+                const id = String(href).replace(/^cid:/i, '').replace(/^<|>$/g, '');
                 for (const p of partes) {
                   const h = p.headers ?? {};
                   const cid = String(
@@ -2303,7 +2310,6 @@ export class AfipService implements OnModuleInit {
                     return Buffer.isBuffer(p.body) ? p.body : Buffer.from(p.body ?? '');
                   }
                 }
-                // Fallback: si hay una sola parte, es esta.
                 if (partes.length === 1 && partes[0]?.body != null) {
                   const b = partes[0].body;
                   return Buffer.isBuffer(b) ? b : Buffer.from(b);
@@ -2311,14 +2317,34 @@ export class AfipService implements OnModuleInit {
                 return null;
               };
 
-              // Extrae el base64 del campo content: referencia MTOM, o las
-              // formas inline en que node-soap devuelve un base64Binary.
+              // Parte MIME por Content-ID desde el multipart crudo (vía B).
+              const cidFromRaw = (href: string): Buffer | null => {
+                if (!Buffer.isBuffer(lastResp)) return null;
+                const id = String(href).replace(/^cid:/i, '').replace(/^<|>$/g, '');
+                const s = lastResp.toString('latin1'); // byte-exacto
+                let idx = 0;
+                while ((idx = s.indexOf('Content-ID', idx)) !== -1) {
+                  const lineEnd = s.indexOf('\n', idx);
+                  if (lineEnd === -1) break;
+                  if (s.slice(idx, lineEnd).includes(id)) {
+                    const sep = s.indexOf('\r\n\r\n', idx);
+                    if (sep === -1) return null;
+                    const start = sep + 4;
+                    let end = s.indexOf('\r\n--', start);
+                    if (end === -1) end = s.length;
+                    return lastResp.subarray(start, end);
+                  }
+                  idx = lineEnd;
+                }
+                return null;
+              };
+
               const extraerBase64 = (adj: any): string => {
                 let v: any = adj.content ?? adj.contenido;
                 if (v && typeof v === 'object' && !Buffer.isBuffer(v)) {
                   const href = v.Include?.attributes?.href ?? v.Include?.href;
                   if (href) {
-                    const buf = cidBody(href);
+                    const buf = cidBody(href) ?? cidFromRaw(href);
                     return buf ? buf.toString('base64') : '';
                   }
                   if (v.type === 'Buffer' && Array.isArray(v.data)) {
