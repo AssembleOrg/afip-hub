@@ -2263,19 +2263,52 @@ export class AfipService implements OnModuleInit {
                                result?.Comunicacion || 
                                result;
 
-            // Parsear adjuntos si existen
+            // Parsear adjuntos si existen. Según el WSDL, cada <adjunto> tiene
+            // filename, content (base64Binary) y contentSize.
             let adjuntos: any[] = [];
             if (comunicacion.adjuntos?.adjunto) {
-              const adjuntosData = Array.isArray(comunicacion.adjuntos.adjunto) 
-                ? comunicacion.adjuntos.adjunto 
+              const adjuntosData = Array.isArray(comunicacion.adjuntos.adjunto)
+                ? comunicacion.adjuntos.adjunto
                 : [comunicacion.adjuntos.adjunto];
-              
-              adjuntos = adjuntosData.map((adj: any) => ({
-                nombre: adj.nombre || adj.fileName || '',
-                tipoMime: adj.tipoMime || adj.mimeType || 'application/octet-stream',
-                contenidoBase64: incluirAdjuntos ? (adj.contenido || adj.content || '') : undefined,
-                tamanio: adj.tamanio ? Number(adj.tamanio) : undefined,
-              }));
+
+              // Diagnóstico: node-soap puede nombrar/tipar los campos distinto.
+              this.logger.log(
+                'Estructura de adjunto[0]: ' +
+                  JSON.stringify(
+                    Object.fromEntries(
+                      Object.entries(adjuntosData[0] ?? {}).map(([k, v]) => [
+                        k,
+                        Buffer.isBuffer(v)
+                          ? `<Buffer ${v.length}b>`
+                          : typeof v,
+                      ]),
+                    ),
+                  ),
+              );
+
+              adjuntos = adjuntosData.map((adj: any) => {
+                // content llega como Buffer (base64Binary) o string; normalizar a
+                // string base64 para que el front pueda hacer atob().
+                const raw = adj.content ?? adj.contenido;
+                const contenidoBase64 = !incluirAdjuntos
+                  ? undefined
+                  : Buffer.isBuffer(raw)
+                    ? raw.toString('base64')
+                    : typeof raw === 'string'
+                      ? raw
+                      : '';
+                return {
+                  nombre:
+                    adj.filename || adj.fileName || adj.nombre || 'adjunto',
+                  tipoMime: adj.tipoMime || adj.mimeType || 'application/octet-stream',
+                  contenidoBase64,
+                  tamanio: adj.contentSize
+                    ? Number(adj.contentSize)
+                    : adj.tamanio
+                      ? Number(adj.tamanio)
+                      : undefined,
+                };
+              });
             }
 
             const response = {
