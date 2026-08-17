@@ -2271,32 +2271,39 @@ export class AfipService implements OnModuleInit {
                 ? comunicacion.adjuntos.adjunto
                 : [comunicacion.adjuntos.adjunto];
 
-              // Diagnóstico: node-soap puede nombrar/tipar los campos distinto.
-              this.logger.log(
-                'Estructura de adjunto[0]: ' +
-                  JSON.stringify(
-                    Object.fromEntries(
-                      Object.entries(adjuntosData[0] ?? {}).map(([k, v]) => [
-                        k,
-                        Buffer.isBuffer(v)
-                          ? `<Buffer ${v.length}b>`
-                          : typeof v,
-                      ]),
-                    ),
-                  ),
-              );
+              // Diagnóstico: content viene como object (node-soap envuelve el
+              // base64Binary). Logueamos sus keys + un snippet para saber dónde
+              // está el binario.
+              const c0 = adjuntosData[0]?.content;
+              if (c0 && typeof c0 === 'object' && !Buffer.isBuffer(c0)) {
+                this.logger.log(
+                  'content[0] keys: ' +
+                    JSON.stringify(Object.keys(c0)) +
+                    ' | snippet: ' +
+                    JSON.stringify(c0).slice(0, 200),
+                );
+              }
+
+              // Extrae el base64 del campo content, desenvolviendo las formas
+              // en que node-soap puede devolver un base64Binary: Buffer directo,
+              // string, { $value }, { _ }, o { type:'Buffer', data:[...] }.
+              const extraerBase64 = (adj: any): string => {
+                let v: any = adj.content ?? adj.contenido;
+                if (v && typeof v === 'object' && !Buffer.isBuffer(v)) {
+                  if (v.type === 'Buffer' && Array.isArray(v.data)) {
+                    v = Buffer.from(v.data);
+                  } else {
+                    v = v.$value ?? v._ ?? v.value ?? v.content ?? v.data ?? '';
+                  }
+                }
+                if (Buffer.isBuffer(v)) return v.toString('base64');
+                return typeof v === 'string' ? v : '';
+              };
 
               adjuntos = adjuntosData.map((adj: any) => {
-                // content llega como Buffer (base64Binary) o string; normalizar a
-                // string base64 para que el front pueda hacer atob().
-                const raw = adj.content ?? adj.contenido;
                 const contenidoBase64 = !incluirAdjuntos
                   ? undefined
-                  : Buffer.isBuffer(raw)
-                    ? raw.toString('base64')
-                    : typeof raw === 'string'
-                      ? raw
-                      : '';
+                  : extraerBase64(adj);
                 return {
                   nombre:
                     adj.filename || adj.fileName || adj.nombre || 'adjunto',
