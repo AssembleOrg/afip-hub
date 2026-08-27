@@ -143,58 +143,62 @@ export class InvoicePdfService implements OnModuleDestroy {
     const numStr = String(dto.numeroComprobante).padStart(8, '0');
     const isFacturaA = dto.letra === 'A' || dto.letra === 'M';
 
+    const subtotalGeneral = dto.items.reduce((acc, i) => acc + (i.subtotal || 0), 0);
+
     const data = {
       // Encabezado
       tipoComprobante: dto.tipoComprobante.toUpperCase(),
+      // Título del recuadro derecho: sin la letra final (la letra ya va en el
+      // recuadro central). "FACTURA C" -> "FACTURA", "NOTA DE CREDITO B" -> "NOTA DE CREDITO".
+      tipoComprobanteTitulo: dto.tipoComprobante
+        .toUpperCase()
+        .replace(/\s+[ABCM]$/, ''),
       letra: dto.letra,
       codigoComprobante: this.getTipoComprobanteCode(dto.tipoComprobante).toString().padStart(3, '0'),
       puntoVentaStr: pvStr,
       numeroComprobanteStr: numStr,
       fechaEmision: dto.fechaEmision,
 
-      // Emisor
-      emisor: {
-        ...dto.emisor,
-        cuitFormateado: this.formatCuit(dto.emisor.cuit),
-      },
+      // Emisor (CUIT sin guiones, como el comprobante oficial)
+      emisor: { ...dto.emisor },
 
-      // Receptor
+      // Receptor (documento sin guiones; consumidor final => en blanco)
       receptor: {
         ...dto.receptor,
-        documentoFormateado: dto.receptor.documento === '0' ? 'S/N' : this.formatCuit(dto.receptor.documento),
+        documentoFormateado: dto.receptor.documento === '0' ? '' : dto.receptor.documento,
       },
 
       // Período
-      tienePeriodo: !!(dto.periodoDesde || dto.periodoHasta || dto.fechaVencimientoPago),
       periodoDesde: dto.periodoDesde,
       periodoHasta: dto.periodoHasta,
       fechaVencimientoPago: dto.fechaVencimientoPago,
       condicionVenta: dto.condicionVenta,
 
-      // Items
+      // Items (montos SIN "$": el signo va en las etiquetas de totales)
       isFacturaA,
-      items: dto.items.map((item) => ({
-        ...item,
-        cantidadStr: item.cantidad % 1 === 0 ? item.cantidad.toString() : item.cantidad.toFixed(2),
-        unidadStr: item.unidad || 'unidad',
-        precioUnitarioStr: this.formatCurrency(item.precioUnitario),
-        bonificacionStr: item.bonificacion ? `${item.bonificacion}%` : '-',
-        subtotalStr: this.formatCurrency(item.subtotal),
-        alicuotaIvaStr: item.alicuotaIva != null ? `${item.alicuotaIva}%` : '-',
-        importeIvaStr: item.importeIva != null ? this.formatCurrency(item.importeIva) : '-',
-      })),
+      items: dto.items.map((item) => {
+        const impBonif =
+          item.bonificacion && item.bonificacion > 0
+            ? (item.precioUnitario * item.cantidad * item.bonificacion) / 100
+            : 0;
+        return {
+          ...item,
+          cantidadStr: this.formatNumber(item.cantidad),
+          unidadStr: item.unidad || 'unidades',
+          precioUnitarioStr: this.formatNumber(item.precioUnitario),
+          bonificacionStr: this.formatNumber(item.bonificacion || 0),
+          impBonificadoStr: this.formatNumber(impBonif),
+          subtotalStr: this.formatNumber(item.subtotal),
+        };
+      }),
 
-      // Totales
-      importeNetoGravadoStr: this.formatCurrency(dto.importeNetoGravado),
-      importeNetoNoGravado: dto.importeNetoNoGravado,
-      importeNetoNoGravadoStr: dto.importeNetoNoGravado ? this.formatCurrency(dto.importeNetoNoGravado) : null,
-      importeExento: dto.importeExento,
-      importeExentoStr: dto.importeExento ? this.formatCurrency(dto.importeExento) : null,
-      importeIva: dto.importeIva,
-      importeIvaStr: dto.importeIva ? this.formatCurrency(dto.importeIva) : null,
-      importeTributos: dto.importeTributos,
-      importeTributosStr: dto.importeTributos ? this.formatCurrency(dto.importeTributos) : null,
-      importeTotalStr: this.formatCurrency(dto.importeTotal),
+      // Totales (números sin "$"; el "$" está en el label del template)
+      subtotalGeneralStr: this.formatNumber(subtotalGeneral),
+      importeNetoGravadoStr: this.formatNumber(dto.importeNetoGravado),
+      importeIvaStr: dto.importeIva ? this.formatNumber(dto.importeIva) : null,
+      importeTributosStr:
+        dto.importeTributos != null ? this.formatNumber(dto.importeTributos) : null,
+      importeTotalStr: this.formatNumber(dto.importeTotal),
 
       // Observaciones
       observaciones: dto.observaciones,
@@ -242,6 +246,14 @@ export class InvoicePdfService implements OnModuleDestroy {
 
   private formatCurrency(amount: number): string {
     return `$ ${amount.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+
+  /** Número es-AR con 2 decimales, SIN símbolo (ej: 78000,00). */
+  private formatNumber(amount: number): string {
+    return (amount ?? 0).toLocaleString('es-AR', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
   }
 
   private convertDateToISO(date: string): string {

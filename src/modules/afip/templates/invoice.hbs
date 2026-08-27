@@ -4,135 +4,177 @@
 <meta charset="UTF-8">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #000; padding: 20px 30px; }
+  html, body { font-family: Arial, Helvetica, sans-serif; font-size: 10px; color: #000; }
+  body { padding: 0; }
+
+  .doc { width: 100%; }
+
+  /* Cada bloque comparte borde para que se vea como un formulario continuo */
+  .box { border: 1px solid #000; }
+
+  /* === "ORIGINAL" === */
+  .original {
+    text-align: center; font-weight: bold; font-size: 13px;
+    padding: 4px 0; border: 1px solid #000; border-bottom: none;
+  }
 
   /* === ENCABEZADO === */
-  .header { display: flex; border: 2px solid #000; margin-bottom: 8px; }
-  .header-left { flex: 1; padding: 12px 15px; }
-  .header-left .razon-social { font-size: 18px; font-weight: bold; margin-bottom: 4px; }
-  .header-left .domicilio { font-size: 9px; color: #333; }
+  /* 3 columnas reales: emisor | letra | comprobante. La columna de la letra va
+     centrada con líneas divisorias a ambos lados (como el comprobante oficial),
+     y al ser una columna propia NUNCA se superpone con el título. */
+  .header { display: flex; border: 1px solid #000; min-height: 118px; }
+  .header-left { flex: 1; padding: 8px 12px; border-right: 1px solid #000; }
+  .header-letra {
+    width: 64px; flex-shrink: 0; padding: 6px 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+    border-right: 1px solid #000;
+  }
+  .header-right { flex: 1; padding: 8px 12px; }
 
-  .header-letra { width: 70px; display: flex; flex-direction: column; align-items: center; justify-content: center; border-left: 2px solid #000; border-right: 2px solid #000; padding: 5px; }
-  .header-letra .letra { font-size: 36px; font-weight: bold; line-height: 1; }
-  .header-letra .cod { font-size: 8px; color: #555; margin-top: 2px; }
+  .emisor-nombre {
+    text-align: center; font-weight: bold; font-size: 13px;
+    margin: 6px 0 14px;
+  }
+  .ln { font-size: 10px; line-height: 1.5; margin-bottom: 2px; }
+  .ln b { font-weight: bold; }
 
-  .header-right { flex: 1; padding: 12px 15px; text-align: right; }
-  .header-right .tipo-comprobante { font-size: 16px; font-weight: bold; margin-bottom: 4px; }
-  .header-right .numero { font-size: 13px; margin-bottom: 2px; }
-  .header-right .fecha { font-size: 10px; color: #333; }
+  .header-letra .letra { font-size: 34px; font-weight: bold; line-height: 1; margin-top: 4px; }
+  .header-letra .cod { font-size: 8px; margin-top: 2px; }
 
-  /* === DATOS EMISOR / RECEPTOR === */
-  .datos-section { display: flex; border: 1px solid #000; margin-bottom: 8px; }
-  .datos-emisor, .datos-receptor { flex: 1; padding: 10px 12px; font-size: 10px; line-height: 1.6; }
-  .datos-emisor { border-right: 1px solid #000; }
-  .datos-label { font-weight: bold; }
+  .header-right .titulo { font-size: 22px; font-weight: bold; margin: 2px 0 22px; }
+  .header-right .ln { margin-bottom: 3px; }
 
-  /* === PERIODO === */
-  .periodo-row { border: 1px solid #000; border-top: none; margin-top: -9px; margin-bottom: 8px; padding: 6px 12px; font-size: 10px; display: flex; gap: 25px; }
+  /* === PERÍODO === */
+  .periodo {
+    border: 1px solid #000; border-top: none;
+    padding: 5px 12px; font-size: 10px; font-weight: bold;
+    display: flex; flex-wrap: wrap; gap: 6px 34px;
+  }
+  .periodo .lbl { font-weight: bold; }
+  .periodo .val { font-weight: bold; }
+
+  /* === RECEPTOR === */
+  .receptor {
+    border: 1px solid #000; border-top: none;
+    padding: 8px 12px; font-size: 10px; line-height: 1.7;
+  }
+  .receptor .row { display: flex; }
+  .receptor .row > div { flex: 1; }
+  .receptor b { font-weight: bold; }
 
   /* === TABLA DE ITEMS === */
-  .items-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
-  .items-table th { background: #e8e8e8; border: 1px solid #000; padding: 5px 6px; font-size: 9px; font-weight: bold; text-align: center; }
-  .items-table td { border: 1px solid #ccc; padding: 4px 6px; font-size: 9px; }
-  .items-table td.text-right { text-align: right; }
-  .items-table td.text-center { text-align: center; }
-  .items-table tbody tr:last-child td { border-bottom: 1px solid #000; }
+  .items { width: 100%; border-collapse: collapse; margin-top: 8px; table-layout: fixed; }
+  .items th {
+    background: #e6e6e6; border: 1px solid #000; padding: 5px 4px;
+    font-size: 9.5px; font-weight: bold; text-align: center;
+  }
+  .items td { padding: 5px 5px; font-size: 9.5px; vertical-align: top; }
+  .items tbody td { border-left: 1px solid #000; border-right: 1px solid #000; }
+  .items .r { text-align: right; }
+  .items .c { text-align: center; }
+  /* filas superior/inferior del cuerpo cerradas por líneas del encabezado y el pie */
+  .items thead tr th { border-bottom: 1px solid #000; }
+
+  .items-wrap { border-left: 1px solid #000; border-right: 1px solid #000; border-bottom: 1px solid #000; }
 
   /* === TOTALES === */
-  .totales { display: flex; justify-content: flex-end; margin-bottom: 10px; }
-  .totales-table { width: 280px; }
-  .totales-table .total-row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 10px; }
-  .totales-table .total-row.total-final { border-top: 2px solid #000; font-size: 14px; font-weight: bold; padding-top: 6px; margin-top: 4px; }
+  .totales { display: flex; justify-content: flex-end; margin-top: 10px; }
+  .totales .caja { width: 340px; border: 1px solid #000; padding: 8px 12px; }
+  .totales .fila { display: flex; justify-content: space-between; font-size: 11px; font-weight: bold; padding: 3px 0; }
+  .totales .fila.grande { font-size: 13px; }
 
-  /* === OBSERVACIONES === */
-  .observaciones { border: 1px solid #ccc; padding: 6px 10px; margin-bottom: 10px; font-size: 9px; }
-  .observaciones .obs-label { font-weight: bold; }
-
-  /* === PIE: CAE + QR === */
-  .footer-cae { display: flex; border: 2px solid #000; margin-top: 15px; }
-  .footer-qr { width: 130px; display: flex; align-items: center; justify-content: center; padding: 8px; border-right: 1px solid #000; }
-  .footer-qr img { width: 110px; height: 110px; }
-  .footer-info { flex: 1; padding: 12px 15px; display: flex; flex-direction: column; justify-content: center; }
-  .footer-info .cae-line { font-size: 12px; margin-bottom: 4px; }
-  .footer-info .cae-label { font-weight: bold; }
-  .footer-info .legal { font-size: 8px; color: #555; font-style: italic; margin-top: 10px; }
+  /* === PIE: QR + ARCA + CAE === */
+  .pie { display: flex; align-items: flex-start; margin-top: 16px; }
+  .pie-qr { width: 120px; }
+  .pie-qr img { width: 108px; height: 108px; display: block; }
+  .pie-logo { width: 190px; padding-top: 6px; }
+  .arca { font-size: 30px; font-weight: bold; letter-spacing: 1px; line-height: 1; }
+  .arca-sub { font-size: 6.5px; font-weight: bold; letter-spacing: 0.3px; margin-top: 2px; }
+  .pie-mid { flex: 1; text-align: center; padding-top: 6px; }
+  .pie-mid .pag { font-size: 11px; font-weight: bold; }
+  .pie-mid .autorizado { font-size: 12px; font-weight: bold; font-style: italic; margin-top: 30px; }
+  .pie-mid .legal { font-size: 7.5px; margin-top: 3px; }
+  .pie-right { width: 250px; text-align: right; padding-top: 6px; }
+  .pie-right .cae { font-size: 12px; font-weight: bold; margin-bottom: 4px; }
+  .pie-right .cae b { font-weight: bold; }
 </style>
 </head>
 <body>
+<div class="doc">
+
+  <div class="original">ORIGINAL</div>
 
   <!-- ENCABEZADO -->
   <div class="header">
     <div class="header-left">
-      <div class="razon-social">{{emisor.razonSocial}}</div>
-      <div class="domicilio">{{emisor.domicilio}}</div>
+      <div class="emisor-nombre">{{emisor.razonSocial}}</div>
+      <div class="ln"><b>Razón Social:</b> {{emisor.razonSocial}}</div>
+      {{#if emisor.domicilio}}<div class="ln"><b>Domicilio Comercial:</b> {{emisor.domicilio}}</div>{{/if}}
+      <div class="ln"><b>Condición frente al IVA:</b> {{emisor.condicionIva}}</div>
     </div>
+
     <div class="header-letra">
       <div class="letra">{{letra}}</div>
-      <div class="cod">Cod. {{codigoComprobante}}</div>
+      <div class="cod">COD. {{codigoComprobante}}</div>
     </div>
+
     <div class="header-right">
-      <div class="tipo-comprobante">{{tipoComprobante}}</div>
-      <div class="numero">Nro: {{puntoVentaStr}}-{{numeroComprobanteStr}}</div>
-      <div class="fecha">Fecha de emisión: {{fechaEmision}}</div>
+      <div class="titulo">{{tipoComprobanteTitulo}}</div>
+      <div class="ln"><b>Punto de Venta:</b> {{puntoVentaStr}} &nbsp;&nbsp;&nbsp; <b>Comp. Nro:</b> {{numeroComprobanteStr}}</div>
+      <div class="ln"><b>Fecha de Emisión:</b> {{fechaEmision}}</div>
+      <div class="ln" style="margin-top:6px;"><b>CUIT:</b> {{emisor.cuit}}</div>
+      {{#if emisor.iibb}}<div class="ln"><b>Ingresos Brutos:</b> {{emisor.iibb}}</div>{{/if}}
+      {{#if emisor.inicioActividades}}<div class="ln"><b>Fecha de Inicio de Actividades:</b> {{emisor.inicioActividades}}</div>{{/if}}
     </div>
   </div>
 
-  <!-- DATOS EMISOR / RECEPTOR -->
-  <div class="datos-section">
-    <div class="datos-emisor">
-      <div><span class="datos-label">CUIT:</span> {{emisor.cuitFormateado}}</div>
-      <div><span class="datos-label">Condición frente al IVA:</span> {{emisor.condicionIva}}</div>
-      {{#if emisor.iibb}}<div><span class="datos-label">IIBB:</span> {{emisor.iibb}}</div>{{/if}}
-      {{#if emisor.inicioActividades}}<div><span class="datos-label">Inicio de Actividades:</span> {{emisor.inicioActividades}}</div>{{/if}}
-      {{#if condicionVenta}}<div><span class="datos-label">Condición de venta:</span> {{condicionVenta}}</div>{{/if}}
+  <!-- PERÍODO -->
+  <div class="periodo">
+    <span><span class="lbl">Período Facturado Desde:</span> <span class="val">{{#if periodoDesde}}{{periodoDesde}}{{else}}{{fechaEmision}}{{/if}}</span></span>
+    <span><span class="lbl">Hasta:</span> <span class="val">{{#if periodoHasta}}{{periodoHasta}}{{else}}{{fechaEmision}}{{/if}}</span></span>
+    <span><span class="lbl">Fecha de Vto. para el pago:</span> <span class="val">{{#if fechaVencimientoPago}}{{fechaVencimientoPago}}{{else}}{{fechaEmision}}{{/if}}</span></span>
+  </div>
+
+  <!-- RECEPTOR -->
+  <div class="receptor">
+    <div class="row">
+      <div><b>CUIT:</b> {{receptor.documentoFormateado}}</div>
+      <div><b>Apellido y Nombre / Razón Social:</b> {{receptor.razonSocial}}</div>
     </div>
-    <div class="datos-receptor">
-      <div><span class="datos-label">Razón Social:</span> {{receptor.razonSocial}}</div>
-      <div><span class="datos-label">{{receptor.tipoDocumento}}:</span> {{receptor.documentoFormateado}}</div>
-      <div><span class="datos-label">Condición frente al IVA:</span> {{receptor.condicionIva}}</div>
-      {{#if receptor.domicilio}}<div><span class="datos-label">Domicilio:</span> {{receptor.domicilio}}</div>{{/if}}
+    <div class="row">
+      <div><b>Condición frente al IVA:</b> {{receptor.condicionIva}}</div>
+      {{#if receptor.domicilio}}<div><b>Domicilio:</b> {{receptor.domicilio}}</div>{{else}}<div></div>{{/if}}
+    </div>
+    <div class="row">
+      <div><b>Condición de venta:</b> {{#if condicionVenta}}{{condicionVenta}}{{else}}Contado{{/if}}</div>
     </div>
   </div>
 
-  {{#if tienePeriodo}}
-  <div class="periodo-row">
-    {{#if periodoDesde}}<div><span class="datos-label">Período desde:</span> {{periodoDesde}}</div>{{/if}}
-    {{#if periodoHasta}}<div><span class="datos-label">Período hasta:</span> {{periodoHasta}}</div>{{/if}}
-    {{#if fechaVencimientoPago}}<div><span class="datos-label">Vto. Pago:</span> {{fechaVencimientoPago}}</div>{{/if}}
-  </div>
-  {{/if}}
-
-  <!-- DETALLE DE ITEMS -->
-  <table class="items-table">
+  <!-- DETALLE -->
+  <table class="items">
     <thead>
       <tr>
-        <th>Código</th>
-        <th>Descripción</th>
-        <th>Cantidad</th>
-        <th>U. Medida</th>
-        <th>Precio Unit.</th>
-        <th>Bonif.</th>
-        <th>Subtotal</th>
-        {{#if isFacturaA}}
-        <th>IVA %</th>
-        <th>IVA</th>
-        {{/if}}
+        <th style="width:8%">Código</th>
+        <th style="width:34%">Producto / Servicio</th>
+        <th style="width:9%">Cantidad</th>
+        <th style="width:9%">U. Medida</th>
+        <th style="width:12%">Precio Unit.</th>
+        <th style="width:7%">% Bonif.</th>
+        <th style="width:9%">Imp. Bonif.</th>
+        <th style="width:12%">Subtotal</th>
       </tr>
     </thead>
     <tbody>
       {{#each items}}
       <tr>
-        <td class="text-center">{{this.codigo}}</td>
+        <td class="c">{{this.codigo}}</td>
         <td>{{this.descripcion}}</td>
-        <td class="text-center">{{this.cantidadStr}}</td>
-        <td class="text-center">{{this.unidadStr}}</td>
-        <td class="text-right">{{this.precioUnitarioStr}}</td>
-        <td class="text-center">{{this.bonificacionStr}}</td>
-        <td class="text-right">{{this.subtotalStr}}</td>
-        {{#if ../isFacturaA}}
-        <td class="text-center">{{this.alicuotaIvaStr}}</td>
-        <td class="text-right">{{this.importeIvaStr}}</td>
-        {{/if}}
+        <td class="c">{{this.cantidadStr}}</td>
+        <td class="c">{{this.unidadStr}}</td>
+        <td class="r">{{this.precioUnitarioStr}}</td>
+        <td class="c">{{this.bonificacionStr}}</td>
+        <td class="r">{{this.impBonificadoStr}}</td>
+        <td class="r">{{this.subtotalStr}}</td>
       </tr>
       {{/each}}
     </tbody>
@@ -140,61 +182,36 @@
 
   <!-- TOTALES -->
   <div class="totales">
-    <div class="totales-table">
+    <div class="caja">
       {{#if isFacturaA}}
-      <div class="total-row">
-        <span>Importe Neto Gravado:</span>
-        <span>{{importeNetoGravadoStr}}</span>
-      </div>
-      {{#if importeNetoNoGravado}}
-      <div class="total-row">
-        <span>Importe Neto No Gravado:</span>
-        <span>{{importeNetoNoGravadoStr}}</span>
-      </div>
+      <div class="fila"><span>Importe Neto Gravado: $</span><span>{{importeNetoGravadoStr}}</span></div>
+      {{#if importeIvaStr}}<div class="fila"><span>IVA: $</span><span>{{importeIvaStr}}</span></div>{{/if}}
+      {{else}}
+      <div class="fila"><span>Subtotal: $</span><span>{{subtotalGeneralStr}}</span></div>
       {{/if}}
-      {{#if importeExento}}
-      <div class="total-row">
-        <span>Importe Exento:</span>
-        <span>{{importeExentoStr}}</span>
-      </div>
-      {{/if}}
-      {{#if importeIva}}
-      <div class="total-row">
-        <span>IVA:</span>
-        <span>{{importeIvaStr}}</span>
-      </div>
-      {{/if}}
-      {{#if importeTributos}}
-      <div class="total-row">
-        <span>Otros Tributos:</span>
-        <span>{{importeTributosStr}}</span>
-      </div>
-      {{/if}}
-      {{/if}}
-      <div class="total-row total-final">
-        <span>IMPORTE TOTAL:</span>
-        <span>{{importeTotalStr}}</span>
-      </div>
+      <div class="fila"><span>Importe Otros Tributos: $</span><span>{{#if importeTributosStr}}{{importeTributosStr}}{{else}}0,00{{/if}}</span></div>
+      <div class="fila grande"><span>Importe Total: $</span><span>{{importeTotalStr}}</span></div>
     </div>
   </div>
 
-  {{#if observaciones}}
-  <div class="observaciones">
-    <span class="obs-label">Observaciones:</span> {{observaciones}}
-  </div>
-  {{/if}}
-
-  <!-- PIE: CAE + QR -->
-  <div class="footer-cae">
-    <div class="footer-qr">
-      <img src="{{qrDataUrl}}" alt="QR AFIP" />
+  <!-- PIE -->
+  <div class="pie">
+    <div class="pie-qr"><img src="{{qrDataUrl}}" alt="QR AFIP" /></div>
+    <div class="pie-logo">
+      <div class="arca">ARCA</div>
+      <div class="arca-sub">AGENCIA DE RECAUDACIÓN<br>Y CONTROL ADUANERO</div>
     </div>
-    <div class="footer-info">
-      <div class="cae-line"><span class="cae-label">CAE:</span> {{cae}}</div>
-      <div class="cae-line"><span class="cae-label">Fecha Vto. CAE:</span> {{caeFechaVencimiento}}</div>
-      <div class="legal">Comprobante autorizado. Esta factura contribuye al cumplimiento de la Res. Gral. AFIP 4291.</div>
+    <div class="pie-mid">
+      <div class="pag">Pág. 1/1</div>
+      <div class="autorizado">Comprobante Autorizado</div>
+      <div class="legal">Esta Agencia no se responsabiliza por los datos ingresados en el detalle de la operación</div>
+    </div>
+    <div class="pie-right">
+      <div class="cae"><b>CAE N°:</b> {{cae}}</div>
+      <div class="cae"><b>Fecha de Vto. de CAE:</b> {{caeFechaVencimiento}}</div>
     </div>
   </div>
 
+</div>
 </body>
 </html>
