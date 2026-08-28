@@ -1,6 +1,7 @@
 import { Injectable, BadRequestException, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as soap from 'soap';
+import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
@@ -2083,6 +2084,47 @@ export class AfipService implements OnModuleInit {
           return;
         }
 
+        // Construir el request según el WSDL de WSCCOMU. La raíz de
+        // RequestConsultarComunicaciones sólo admite <authRequest> y <filter>;
+        // la paginación (pagina / resultadosPorPagina) va DENTRO de <filter>,
+        // no como elementos sueltos en la raíz. Los elementos de <filter>
+        // deben respetar el orden del <xs:sequence name="Filter">:
+        // estado, fechaDesde, fechaHasta, comunicacionIdDesde,
+        // comunicacionIdHasta, tieneAdjunto, sistemaPublicadorId,
+        // pagina, resultadosPorPagina.
+        const buildRequest = (fechaDesdeEfectiva?: string) => {
+          const filter: any = {};
+          if (filtros?.estado !== undefined) {
+            filter.estado = filtros.estado;
+          }
+          if (fechaDesdeEfectiva) {
+            // Formato esperado: yyyy-MM-dd
+            filter.fechaDesde = fechaDesdeEfectiva;
+          }
+          if (filtros?.fechaHasta) {
+            filter.fechaHasta = filtros.fechaHasta;
+          }
+          if (filtros?.idComunicacionDesde !== undefined) {
+            filter.comunicacionIdDesde = filtros.idComunicacionDesde;
+          }
+          if (filtros?.idComunicacionHasta !== undefined) {
+            filter.comunicacionIdHasta = filtros.idComunicacionHasta;
+          }
+          if (filtros?.idSistemaPublicador !== undefined) {
+            filter.sistemaPublicadorId = filtros.idSistemaPublicador;
+          }
+          filter.pagina = pagina;
+          filter.resultadosPorPagina = itemsPorPagina;
+
+          return {
+            authRequest: {
+              token: ticket.token,
+              sign: ticket.sign,
+              cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
+            },
+            filter,
+          };
+        };
         // El WSDL exige filter con fechaDesde (antigüedad máxima consultable: 360 días)
         // y la paginación viaja dentro de filter (pagina / resultadosPorPagina).
         // Las claves se agregan en el orden del WSDL: node-soap serializa según orden de inserción.
@@ -2117,58 +2159,88 @@ export class AfipService implements OnModuleInit {
 
         this.logger.log('Request a VE: ' + JSON.stringify(request, null, 2));
 
-        client.consultarComunicaciones(request, (err: any, result: any) => {
-          if (err) {
-            this.logger.error(`Error en consultarComunicaciones: ${err.message}`);
-            reject(new BadRequestException(`Error al consultar comunicaciones: ${err.message}`));
-            return;
-          }
+        const procesarRespuesta = (result: any) => {
+          // Parsear respuesta según estructura del PDF
+          const respuestaPaginada =
+            result?.consultarComunicacionesResponse?.RespuestaPaginada ||
+            result?.RespuestaPaginada ||
+            result;
 
-          try {
-            this.logger.log('Respuesta recibida de VE');
-            
-            // Parsear respuesta según estructura del PDF
-            const respuestaPaginada = result?.consultarComunicacionesResponse?.RespuestaPaginada || 
-                                     result?.RespuestaPaginada || 
-                                     result;
+          // Según el WSDL, RespuestaPaginada.items es de tipo Items y sus
+          // hijos son <ComunicacionSimplificada> (no <item>). node-soap los
+          // expone bajo esa key. Contemplamos variantes por robustez.
+          const items =
+            respuestaPaginada?.items?.ComunicacionSimplificada ??
+            respuestaPaginada?.items?.item ??
+            respuestaPaginada?.items ??
+            [];
+          const comunicacionesArray = Array.isArray(items) ? items : (items ? [items] : []);
 
-            const items = respuestaPaginada?.items?.item || respuestaPaginada?.items || [];
-            const comunicacionesArray = Array.isArray(items) ? items : (items ? [items] : []);
+          const comunicaciones = comunicacionesArray.map((c: any) => ({
+            idComunicacion: Number(c.idComunicacion || c.id),
+            cuitDestinatario: String(c.cuitDestinatario || cuitRepresentada),
+            fechaPublicacion: c.fechaPublicacion || '',
+            fechaVencimiento: c.fechaVencimiento || undefined,
+            sistemaPublicador: Number(c.sistemaPublicador || c.idSistemaPublicador || 0),
+            sistemaPublicadorDesc: c.sistemaPublicadorDesc || c.descSistemaPublicador || '',
+            estado: Number(c.estado || 1),
+            estadoDesc: c.estadoDesc || this.getEstadoDescripcion(Number(c.estado || 1)),
+            asunto: c.asunto || '',
+            prioridad: c.prioridad ? Number(c.prioridad) : undefined,
+            tieneAdjunto: c.tieneAdjunto === true || c.tieneAdjunto === 'true' || c.tieneAdjunto === 1,
+            referencia1: c.referencia1 || undefined,
+            referencia2: c.referencia2 || undefined,
+          }));
 
-            // Mapear las comunicaciones al formato de respuesta
-            const comunicaciones = comunicacionesArray.map((c: any) => ({
-              idComunicacion: Number(c.idComunicacion || c.id),
-              cuitDestinatario: String(c.cuitDestinatario || cuitRepresentada),
-              fechaPublicacion: c.fechaPublicacion || '',
-              fechaVencimiento: c.fechaVencimiento || undefined,
-              sistemaPublicador: Number(c.sistemaPublicador || c.idSistemaPublicador || 0),
-              sistemaPublicadorDesc: c.sistemaPublicadorDesc || c.descSistemaPublicador || '',
-              estado: Number(c.estado || 1),
-              estadoDesc: c.estadoDesc || this.getEstadoDescripcion(Number(c.estado || 1)),
-              asunto: c.asunto || '',
-              prioridad: c.prioridad ? Number(c.prioridad) : undefined,
-              tieneAdjunto: c.tieneAdjunto === true || c.tieneAdjunto === 'true' || c.tieneAdjunto === 1,
-              referencia1: c.referencia1 || undefined,
-              referencia2: c.referencia2 || undefined,
-            }));
+          return {
+            paginacion: {
+              pagina: Number(respuestaPaginada?.pagina || pagina),
+              totalPaginas: Number(respuestaPaginada?.totalPaginas || 1),
+              itemsPorPagina: Number(respuestaPaginada?.itemsPorPagina || itemsPorPagina),
+              totalItems: Number(respuestaPaginada?.totalItems || comunicaciones.length),
+            },
+            comunicaciones,
+          };
+        };
 
-            const response = {
-              paginacion: {
-                pagina: Number(respuestaPaginada?.pagina || pagina),
-                totalPaginas: Number(respuestaPaginada?.totalPaginas || 1),
-                itemsPorPagina: Number(respuestaPaginada?.itemsPorPagina || itemsPorPagina),
-                totalItems: Number(respuestaPaginada?.totalItems || comunicaciones.length),
-              },
-              comunicaciones,
-            };
+        // WSCCOMU sólo expone comunicaciones desde una fecha mínima. Si el
+        // caller no pasó fechaDesde (o pasó una anterior al piso), AFIP rechaza
+        // con "Error 101: Fecha desde no soportada. Mínima fecha [YYYY-MM-DD]".
+        // Reintentamos UNA vez con esa fecha exacta: así no hay que hardcodear
+        // el piso y se autoajusta si la ventana avanza.
+        const ejecutar = (fechaDesdeEfectiva: string | undefined, esReintento: boolean) => {
+          const request = buildRequest(fechaDesdeEfectiva);
+          this.logger.log('Request a VE: ' + JSON.stringify(request, null, 2));
 
-            this.logger.log(`Comunicaciones encontradas: ${response.paginacion.totalItems}`);
-            resolve(response);
-          } catch (parseError: any) {
-            this.logger.error(`Error al parsear respuesta VE: ${parseError.message}`);
-            reject(new BadRequestException(`Error al procesar respuesta de Ventanilla Electrónica: ${parseError.message}`));
-          }
-        });
+          client.consultarComunicaciones(request, (err: any, result: any) => {
+            if (err) {
+              const msg = err.message || '';
+              const min = msg.match(/M[ií]nima fecha\s*\[(\d{4}-\d{2}-\d{2})\]/);
+              if (min && !esReintento) {
+                this.logger.warn(
+                  `AFIP exige fechaDesde >= ${min[1]}; reintentando con esa fecha`,
+                );
+                ejecutar(min[1], true);
+                return;
+              }
+              this.logger.error(`Error en consultarComunicaciones: ${msg}`);
+              reject(new BadRequestException(`Error al consultar comunicaciones: ${msg}`));
+              return;
+            }
+
+            try {
+              this.logger.log('Respuesta recibida de VE');
+              const response = procesarRespuesta(result);
+              this.logger.log(`Comunicaciones encontradas: ${response.paginacion.totalItems}`);
+              resolve(response);
+            } catch (parseError: any) {
+              this.logger.error(`Error al parsear respuesta VE: ${parseError.message}`);
+              reject(new BadRequestException(`Error al procesar respuesta de Ventanilla Electrónica: ${parseError.message}`));
+            }
+          });
+        };
+
+        ejecutar(filtros?.fechaDesde, false);
       });
     });
   }
@@ -2233,6 +2305,7 @@ export class AfipService implements OnModuleInit {
           return;
         }
 
+        // RequestConsumirComunicacion = { authRequest, idComunicacion, incluirAdjuntos? }
         const request: any = {
           authRequest: {
             token: ticket.token,
@@ -2245,7 +2318,7 @@ export class AfipService implements OnModuleInit {
 
         this.logger.log('Request a VE consumirComunicacion: ' + JSON.stringify(request, null, 2));
 
-        client.consumirComunicacion(request, (err: any, result: any) => {
+        client.consumirComunicacion(request, async (err: any, result: any) => {
           if (err) {
             this.logger.error(`Error en consumirComunicacion: ${err.message}`);
             reject(new BadRequestException(`Error al consumir comunicación: ${err.message}`));
@@ -2259,11 +2332,12 @@ export class AfipService implements OnModuleInit {
                                result?.Comunicacion || 
                                result;
 
-            // Parsear adjuntos si existen
+            // Parsear adjuntos si existen. Según el WSDL, cada <adjunto> tiene
+            // filename, content (base64Binary) y contentSize.
             let adjuntos: any[] = [];
             if (comunicacion.adjuntos?.adjunto) {
-              const adjuntosData = Array.isArray(comunicacion.adjuntos.adjunto) 
-                ? comunicacion.adjuntos.adjunto 
+              const adjuntosData = Array.isArray(comunicacion.adjuntos.adjunto)
+                ? comunicacion.adjuntos.adjunto
                 : [comunicacion.adjuntos.adjunto];
               
               adjuntos = adjuntosData.map((adj: any) => {
@@ -2275,6 +2349,80 @@ export class AfipService implements OnModuleInit {
                     ? (Buffer.isBuffer(rawContent) ? rawContent.toString('base64') : String(rawContent))
                     : undefined,
                   tamanio: adj.contentSize ? Number(adj.contentSize) : (adj.tamanio ? Number(adj.tamanio) : undefined),
+                };
+              });
+
+              // content viene como referencia XOP/MTOM { Include: { href } }.
+              // node-soap v1.6 descarta la parte MIME con el binario (queda solo
+              // el XML en lastResponse), así que re-pedimos la respuesta cruda
+              // (arraybuffer) reusando el envelope que armó node-soap y parseamos
+              // el multipart/related nosotros.
+              const hrefsPend: string[] = adjuntosData
+                .map(
+                  (a: any) =>
+                    a?.content?.Include?.attributes?.href ??
+                    a?.content?.Include?.href,
+                )
+                .filter(Boolean);
+
+              // Partes binarias del multipart crudo (excluye la raíz xop+xml).
+              // OJO: los Content-ID del re-fetch NO coinciden con los que parseó
+              // node-soap (es otra request; CXF genera un cid nuevo por respuesta),
+              // así que NO se puede matchear por cid entre requests: mapeamos las
+              // partes binarias por POSICIÓN a los adjuntos que traen xop:Include.
+              let binaryParts: Buffer[] = [];
+              if (incluirAdjuntos && hrefsPend.length > 0) {
+                const endpoint = ventanillaUrl.replace(/\?wsdl$/i, '');
+                const reqCt =
+                  (client as any).lastRequestHeaders?.['Content-Type'] ??
+                  (client as any).lastRequestHeaders?.['content-type'];
+                binaryParts = await this.fetchMtomBinaryParts(
+                  endpoint,
+                  (client as any).lastRequest,
+                  reqCt,
+                );
+              }
+              this.logger.log(
+                `MTOM binaryParts=${binaryParts.length} sizes=[${binaryParts
+                  .map((b) => b.length)
+                  .join(',')}] adjuntos=${adjuntosData.length}`,
+              );
+
+              // Cursor sobre las partes binarias: cada adjunto con xop:Include
+              // consume la siguiente parte en orden de aparición.
+              let xopCursor = 0;
+              const extraerBase64 = (adj: any): string => {
+                let v: any = adj.content ?? adj.contenido;
+                if (v && typeof v === 'object' && !Buffer.isBuffer(v)) {
+                  const isXop = !!(v.Include?.attributes?.href ?? v.Include?.href);
+                  if (isXop) {
+                    const buf = binaryParts[xopCursor++];
+                    return buf ? buf.toString('base64') : '';
+                  }
+                  if (v.type === 'Buffer' && Array.isArray(v.data)) {
+                    v = Buffer.from(v.data);
+                  } else {
+                    v = v.$value ?? v._ ?? v.value ?? v.content ?? v.data ?? '';
+                  }
+                }
+                if (Buffer.isBuffer(v)) return v.toString('base64');
+                return typeof v === 'string' ? v : '';
+              };
+
+              adjuntos = adjuntosData.map((adj: any) => {
+                const contenidoBase64 = !incluirAdjuntos
+                  ? undefined
+                  : extraerBase64(adj);
+                return {
+                  nombre:
+                    adj.filename || adj.fileName || adj.nombre || 'adjunto',
+                  tipoMime: adj.tipoMime || adj.mimeType || 'application/octet-stream',
+                  contenidoBase64,
+                  tamanio: adj.contentSize
+                    ? Number(adj.contentSize)
+                    : adj.tamanio
+                      ? Number(adj.tamanio)
+                      : undefined,
                 };
               });
             }
@@ -2307,6 +2455,94 @@ export class AfipService implements OnModuleInit {
         });
       });
     });
+  }
+
+  /**
+   * Re-pide una respuesta SOAP 1.2 / MTOM como binario crudo. node-soap descarta
+   * las partes MIME con los adjuntos, así que reenviamos el mismo envelope con
+   * axios (responseType arraybuffer) y devolvemos el multipart/related completo
+   * (byte-exacto) para poder extraer los adjuntos. Devuelve null si falla.
+   */
+  private async fetchMtomBinaryParts(
+    endpoint: string,
+    envelope: string,
+    contentType?: string,
+  ): Promise<Buffer[]> {
+    if (!envelope) return [];
+    try {
+      const res = await axios.post(endpoint, envelope, {
+        headers: {
+          'Content-Type': contentType || 'application/soap+xml; charset=utf-8',
+        },
+        responseType: 'arraybuffer',
+        timeout: 30000,
+        validateStatus: () => true,
+      });
+      const buf = Buffer.from(res.data);
+      const respCt = String(res.headers['content-type'] ?? '');
+      this.logger.log(
+        `fetchMtomMultipart: status=${res.status} ct=${respCt} bytes=${buf.length}`,
+      );
+      if (res.status < 200 || res.status >= 300) return [];
+      // El boundary confiable viene del header de la respuesta, no del body.
+      const m = /boundary="?([^";]+)"?/i.exec(respCt);
+      return this.parseMtomBinaryParts(buf, m ? m[1] : undefined);
+    } catch (e: any) {
+      this.logger.error(`fetchMtomMultipart error: ${e?.message ?? e}`);
+      return [];
+    }
+  }
+
+  /**
+   * Parsea un multipart/related (MTOM/XOP) crudo y devuelve las partes binarias
+   * en orden, EXCLUYENDO la parte raíz `application/xop+xml` (el sobre SOAP).
+   * Se trabaja en `latin1` para ubicar delimitadores/headers byte-exacto y luego
+   * se recortan los cuerpos sobre el Buffer original (sin corromper el binario).
+   * `boundary` viene del header Content-Type de la respuesta; si falta, se cae a
+   * detectarlo desde la primera línea del cuerpo.
+   */
+  private parseMtomBinaryParts(raw: Buffer, boundary?: string): Buffer[] {
+    const s = raw.toString('latin1');
+    let delim: string;
+    if (boundary) {
+      delim = '--' + boundary;
+    } else {
+      const firstCrlf = s.indexOf('\r\n');
+      if (firstCrlf === -1) return [];
+      delim = s.slice(0, firstCrlf).trim(); // "--<boundary>"
+    }
+    if (!delim.startsWith('--')) return [];
+
+    // Posiciones de cada delimitador de parte.
+    const positions: number[] = [];
+    let p = s.indexOf(delim, 0);
+    while (p !== -1) {
+      positions.push(p);
+      p = s.indexOf(delim, p + delim.length);
+    }
+    this.logger.log(
+      `parseMtomBinaryParts: delim="${delim.slice(0, 24)}..." delims=${positions.length}`,
+    );
+
+    const parts: Buffer[] = [];
+    for (let i = 0; i < positions.length - 1; i++) {
+      let partStart = positions[i] + delim.length;
+      if (s.slice(partStart, partStart + 2) === '--') continue; // terminador
+      if (s.slice(partStart, partStart + 2) === '\r\n') partStart += 2;
+
+      const partEnd = positions[i + 1];
+      const headerEnd = s.indexOf('\r\n\r\n', partStart);
+      if (headerEnd === -1 || headerEnd >= partEnd) continue;
+
+      const headers = s.slice(partStart, headerEnd);
+      if (/application\/xop\+xml/i.test(headers)) continue; // raíz SOAP
+
+      const bodyStart = headerEnd + 4;
+      let bodyEnd = partEnd - 2; // descarta el \r\n previo al delimitador
+      if (bodyEnd < bodyStart) bodyEnd = bodyStart;
+      parts.push(raw.subarray(bodyStart, bodyEnd));
+    }
+    return parts;
   }
 
   /**
