@@ -1442,9 +1442,28 @@ export class AfipService implements OnModuleInit {
         detalle.IvaCond = condicionIva;
       }
 
+      // Comprobantes clase C (emisor Monotributo / no Responsable Inscripto):
+      // NO discriminan IVA. AFIP exige (errores 10047/10048/10071):
+      //   - ImpIVA = 0 y el objeto Iva ausente (no se informa alícuota).
+      //   - ImpNeto = SubTotal, con ImpTotConc e ImpOpEx en 0.
+      //   - ImpTotal = ImpNeto + ImpTrib.
+      // Normalizamos acá, sin importar qué neto/alícuota haya mandado el caller,
+      // así cualquier consumidor emite C correctamente.
+      const esClaseC = claseComprobante === 'C' || claseComprobante === 'FCE_C';
+      if (esClaseC) {
+        detalle.ImpIVA = 0;
+        detalle.ImpTotConc = 0;
+        detalle.ImpOpEx = 0;
+        detalle.ImpNeto =
+          Math.round(
+            (invoiceData.importeTotal - (invoiceData.importeTributos || 0)) * 100,
+          ) / 100;
+      }
+
       // Array de IVA - Requerido para Facturas A, B, M cuando hay IVA
-      // Según Manual ARCA-COMPG v4.0: debe enviarse el desglose de alícuotas
-      if (invoiceData.iva && invoiceData.iva.length > 0) {
+      // Según Manual ARCA-COMPG v4.0: debe enviarse el desglose de alícuotas.
+      // En clase C el objeto Iva NO debe informarse.
+      if (!esClaseC && invoiceData.iva && invoiceData.iva.length > 0) {
         detalle.Iva = {
           AlicIva: invoiceData.iva.map(iva => ({
             Id: iva.Id,
@@ -1453,7 +1472,7 @@ export class AfipService implements OnModuleInit {
           })),
         };
         this.logger.log(`Array de IVA incluido con ${invoiceData.iva.length} alícuota(s)`);
-      } else if (invoiceData.importeIva > 0 && (claseComprobante === 'A' || claseComprobante === 'B' || claseComprobante === 'M')) {
+      } else if (!esClaseC && invoiceData.importeIva > 0 && (claseComprobante === 'A' || claseComprobante === 'B' || claseComprobante === 'M')) {
         // Si hay IVA pero no se envió el array, crear uno con IVA 21%
         detalle.Iva = {
           AlicIva: [{
