@@ -71,9 +71,14 @@ export class AfipService implements OnModuleInit {
     },
   };
 
-  // WSCCOMU (Ventanilla Electrónica): el nombre de servicio para el TRA de WSAA
-  // es 'veconsumer' (no 'veconsumerws', que devuelve "servicio inexistente")
-  private static readonly VE_WSAA_SERVICE = 'veconsumer';
+  // WSCCOMU (Ventanilla Electrónica): nombre de servicio para el TRA de WSAA.
+  // AFIP/ARCA renombró el servicio en la migración 2026: pasó de 'veconsumer'
+  // (ahora "Servicio informado inexistente" en WSAA de producción) a
+  // 'veconsumerws'. Verificado 2026-09-10 contra wsaa.afip.gov.ar: con
+  // 'veconsumerws' WSAA emite el TA (o pide autorización del CUIT); con
+  // 'veconsumer' devuelve wsn.notFound. El endpoint del WSDL sigue siendo
+  // /ve-ws/services/veconsumer; sólo cambió el nombre de servicio del WSAA.
+  private static readonly VE_WSAA_SERVICE = 'veconsumerws';
 
   // El WSDL de veconsumer solo publica binding SOAP 1.2
   private static readonly VE_SOAP_OPTIONS: soap.IOptions = {
