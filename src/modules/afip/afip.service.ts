@@ -2190,11 +2190,11 @@ export class AfipService implements OnModuleInit {
             sistemaPublicadorDesc: c.sistemaPublicadorDesc || c.descSistemaPublicador || '',
             estado: Number(c.estado || 1),
             estadoDesc: c.estadoDesc || this.getEstadoDescripcion(Number(c.estado || 1)),
-            asunto: c.asunto || '',
+            asunto: this.normalizarNumerosAfip(c.asunto || '') || '',
             prioridad: c.prioridad ? Number(c.prioridad) : undefined,
             tieneAdjunto: c.tieneAdjunto === true || c.tieneAdjunto === 'true' || c.tieneAdjunto === 1,
-            referencia1: c.referencia1 || undefined,
-            referencia2: c.referencia2 || undefined,
+            referencia1: this.normalizarNumerosAfip(c.referencia1) || undefined,
+            referencia2: this.normalizarNumerosAfip(c.referencia2) || undefined,
           }));
 
           return {
@@ -2441,12 +2441,14 @@ export class AfipService implements OnModuleInit {
               sistemaPublicadorDesc: comunicacion.sistemaPublicadorDesc || comunicacion.descSistemaPublicador || '',
               estado: Number(comunicacion.estado || 2), // 2 = Leída (ya que la estamos consumiendo)
               estadoDesc: comunicacion.estadoDesc || this.getEstadoDescripcion(Number(comunicacion.estado || 2)),
-              asunto: comunicacion.asunto || '',
+              asunto: this.normalizarNumerosAfip(comunicacion.asunto || '') || '',
               prioridad: comunicacion.prioridad ? Number(comunicacion.prioridad) : undefined,
               tieneAdjunto: adjuntos.length > 0 || comunicacion.tieneAdjunto === true,
-              referencia1: comunicacion.referencia1 || undefined,
-              referencia2: comunicacion.referencia2 || undefined,
-              cuerpo: comunicacion.cuerpo || comunicacion.mensaje || comunicacion.body || '',
+              referencia1: this.normalizarNumerosAfip(comunicacion.referencia1) || undefined,
+              referencia2: this.normalizarNumerosAfip(comunicacion.referencia2) || undefined,
+              cuerpo: this.normalizarNumerosAfip(
+                comunicacion.cuerpo || comunicacion.mensaje || comunicacion.body || '',
+              ),
               adjuntos: adjuntos.length > 0 ? adjuntos : undefined,
               fechaLectura: comunicacion.fechaLectura || new Date().toISOString(),
             };
@@ -2709,6 +2711,29 @@ export class AfipService implements OnModuleInit {
       2: 'Leída',
     };
     return estados[estado] || `Estado ${estado}`;
+  }
+
+  /**
+   * AFIP/ARCA a veces compone el texto de las comunicaciones con números en
+   * notación científica al estilo .NET (ej: "monto $ 5e+006" en vez de
+   * "$ 5.000.000"; el exponente con relleno de ceros "+006" es formato
+   * printf/.NET, no JS). Esto llega literal dentro del string y rompe la
+   * lectura del cuerpo, asunto y referencias. Los expande a número legible con
+   * separador de miles es-AR. Best-effort: lo que no matchea se devuelve igual.
+   */
+  private normalizarNumerosAfip(texto: string | undefined): string | undefined {
+    if (!texto) return texto;
+    // Mantisa (con posible decimal . o ,) seguida de e/E y exponente con signo.
+    return texto.replace(
+      /(\d+(?:[.,]\d+)?)[eE]([+-]?\d+)/g,
+      (match, mantissa: string, exp: string) => {
+        const valor = Number(`${mantissa.replace(',', '.')}e${Number(exp)}`);
+        if (!Number.isFinite(valor)) return match;
+        return Number.isInteger(valor)
+          ? valor.toLocaleString('es-AR')
+          : valor.toLocaleString('es-AR', { maximumFractionDigits: 2 });
+      },
+    );
   }
 
   // ============================================
