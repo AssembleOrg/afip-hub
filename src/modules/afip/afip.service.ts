@@ -2229,6 +2229,30 @@ export class AfipService implements OnModuleInit {
                 return;
               }
               this.logger.error(`Error en consultarComunicaciones: ${msg}`);
+              // DIAG TEMPORAL: ante "Cannot parse response" node-soap adjunta el
+              // cuerpo crudo y la respuesta. Logueamos content-type + primeros
+              // 800 chars para saber si AFIP devuelve MTOM/multipart, HTML o
+              // un fault fuera de <Body>. Quitar tras diagnosticar.
+              if (/cannot parse response/i.test(msg)) {
+                try {
+                  const ct =
+                    err?.response?.headers?.['content-type'] ??
+                    err?.response?.headers?.['Content-Type'] ??
+                    '(sin content-type)';
+                  const rawBody =
+                    typeof err?.body === 'string'
+                      ? err.body
+                      : JSON.stringify(err?.body ?? '');
+                  this.logger.error(
+                    `DIAG VE content-type=${ct} status=${err?.response?.status} bodyLen=${rawBody?.length}`,
+                  );
+                  this.logger.error(
+                    `DIAG VE body[0..800]=${(rawBody || '').slice(0, 800)}`,
+                  );
+                } catch (diagErr: any) {
+                  this.logger.error(`DIAG VE fallo al loguear body: ${diagErr?.message}`);
+                }
+              }
               reject(new BadRequestException(`Error al consultar comunicaciones: ${msg}`));
               return;
             }
