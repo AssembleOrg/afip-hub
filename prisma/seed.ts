@@ -314,8 +314,14 @@ async function seedPlans() {
 }
 
 async function seedAdminUser() {
-  const email = process.env.ADMIN_EMAIL || 'admin@afip-hub.com';
-  const password = process.env.ADMIN_PASSWORD || 'Admin123!';
+  // Sin defaults: una contraseña fija en el repo terminaba siendo un admin
+  // de producción con credenciales públicas.
+  const email = process.env.ADMIN_EMAIL;
+  const password = process.env.ADMIN_PASSWORD;
+  if (!email || !password) {
+    console.log('  admin omitido: definí ADMIN_EMAIL y ADMIN_PASSWORD para crearlo');
+    return;
+  }
   const hashed = await bcrypt.hash(password, 10);
 
   const user = await prisma.user.upsert({

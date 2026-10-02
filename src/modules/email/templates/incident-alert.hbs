@@ -1,0 +1,31 @@
+{{#if open}}
+<h1 style="margin:0 0 16px;color:#0F172A;font-size:26px;font-weight:700;letter-spacing:-0.02em;line-height:1.2;">Hay clientes recibiendo errores</h1>
+<p style="margin:0 0 20px;color:#475569;font-size:16px;line-height:1.6;">
+  En los últimos <strong>{{windowMin}} minutos</strong> fallaron <strong>{{errors}}</strong> de <strong>{{attempts}}</strong> llamadas ({{errorRatePct}}%) con error del servidor (5xx). Suele ser una caída nuestra o de ARCA.
+</p>
+{{#if since}}<p style="margin:0 0 20px;color:#475569;font-size:14px;">Abierto desde {{since}}.</p>{{/if}}
+{{else}}
+<h1 style="margin:0 0 16px;color:#0F172A;font-size:26px;font-weight:700;letter-spacing:-0.02em;line-height:1.2;">Se normalizaron las llamadas</h1>
+<p style="margin:0 0 20px;color:#475569;font-size:16px;line-height:1.6;">
+  Las fallas 5xx bajaron del umbral. El pico fue de <strong>{{peakErrors}}</strong> fallas en {{windowMin}} minutos{{#if since}}, desde {{since}}{{/if}}.
+</p>
+<p style="margin:0 0 20px;color:#475569;font-size:15px;line-height:1.6;">
+  A cada cliente afectado ya se le sumaron comprobantes de regalo automáticamente. Si el incidente fue largo, podés acreditar más desde Admin → Organizaciones.
+</p>
+{{/if}}
+
+{{#if byEndpoint.length}}
+<h3 style="margin:24px 0 8px;color:#0F172A;font-size:15px;">Endpoints con más fallas</h3>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:14px;color:#475569;">
+  {{#each byEndpoint}}<tr><td style="padding:4px 0;font-family:monospace;">{{endpoint}}</td><td align="right" style="padding:4px 0;">{{errors}}</td></tr>{{/each}}
+</table>
+{{/if}}
+
+{{#if byOrg.length}}
+<h3 style="margin:24px 0 8px;color:#0F172A;font-size:15px;">Organizaciones más afectadas</h3>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:14px;color:#475569;">
+  {{#each byOrg}}<tr><td style="padding:4px 0;">{{name}}</td><td align="right" style="padding:4px 0;">{{errors}}</td></tr>{{/each}}
+</table>
+{{/if}}
+
+<p style="margin:28px 0 0;color:#94A3B8;font-size:12px;">Chequeado {{checkedAt}}.</p>

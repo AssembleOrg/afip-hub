@@ -34,6 +34,7 @@ import { NotificationsModule } from './modules/notifications';
 import { WebhooksModule } from './modules/webhooks';
 import { RetentionModule } from './modules/retention';
 import { StorageAlertsModule } from './modules/storage-alerts';
+import { IncidentAlertsModule } from './modules/incident-alerts/incident-alerts.module';
 import { SelfBillingModule } from './modules/self-billing';
 import { DashboardModule } from './modules/dashboard';
 import { PlatformCertModule } from './modules/platform-cert/platform-cert.module';
@@ -91,6 +92,7 @@ import {
     WebhooksModule,
     RetentionModule,
     StorageAlertsModule,
+    IncidentAlertsModule,
     SelfBillingModule,
     DashboardModule,
     HealthModule,
