@@ -56,12 +56,20 @@ export class AuthService {
       },
     });
 
-    const org = await this.orgsService.createForOwner({
-      ownerUserId: user.id,
-      name: dto.organizationName,
-      slug: dto.organizationSlug,
-      planSlug: dto.planSlug,
-    });
+    // Si la organización no se puede crear, no dejamos un usuario huérfano:
+    // el reintento fallaría con "email ya registrado".
+    let org: Awaited<ReturnType<OrganizationsService['createForOwner']>>;
+    try {
+      org = await this.orgsService.createForOwner({
+        ownerUserId: user.id,
+        name: dto.organizationName,
+        slug: dto.organizationSlug,
+        planSlug: dto.planSlug,
+      });
+    } catch (err) {
+      await this.prisma.user.delete({ where: { id: user.id } }).catch(() => undefined);
+      throw err;
+    }
 
     // Generar API key por defecto — plaintext visible solo aquí, una vez.
     const defaultKey = await this.apiKeys.create(
@@ -84,7 +92,7 @@ export class AuthService {
       action: 'auth.register',
       targetType: 'user',
       targetId: user.id,
-      metadata: { orgSlug: dto.organizationSlug, planSlug: dto.planSlug },
+      metadata: { orgSlug: org.slug, planSlug: dto.planSlug },
       ip,
       userAgent,
     });

@@ -40,12 +40,9 @@ export class OrganizationsService {
       throw new ConflictException('El usuario ya es dueño de una organización');
     }
 
-    const slugTaken = await this.prisma.organization.findUnique({
-      where: { slug: params.slug },
-    });
-    if (slugTaken) {
-      throw new ConflictException(`Slug "${params.slug}" ya está en uso`);
-    }
+    // El nombre de la organización no es único (puede haber varias "Pistech");
+    // el slug sí, así que si está tomado usamos el siguiente libre.
+    const slug = await this.resolveAvailableSlug(params.slug);
 
     const plan = params.planSlug
       ? await this.plansService.getBySlug(params.planSlug)
@@ -58,7 +55,7 @@ export class OrganizationsService {
       const org = await tx.organization.create({
         data: {
           name: params.name,
-          slug: params.slug,
+          slug,
           ownerUserId: params.ownerUserId,
           planId: plan.id,
           subscriptionStatus:
@@ -97,6 +94,21 @@ export class OrganizationsService {
     });
     if (!org) throw new NotFoundException('Organización no encontrada');
     return org;
+  }
+
+  /** Devuelve `base` si está libre; si no, `base-2`, `base-3`… */
+  private async resolveAvailableSlug(base: string): Promise<string> {
+    const taken = await this.prisma.organization.findMany({
+      where: { slug: { startsWith: base } },
+      select: { slug: true },
+    });
+    const used = new Set(taken.map((o) => o.slug));
+    if (!used.has(base)) return base;
+    for (let n = 2; n < 1000; n++) {
+      const candidate = `${base}-${n}`;
+      if (!used.has(candidate)) return candidate;
+    }
+    return `${base}-${Date.now().toString(36)}`;
   }
 
   async findBySlug(slug: string) {
