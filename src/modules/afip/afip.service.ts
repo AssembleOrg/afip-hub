@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as soap from 'soap';
+import axios from 'axios';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
@@ -86,6 +87,28 @@ export class AfipService implements OnModuleInit {
       wscdc: 'https://wswhomo.arca.gov.ar/WSCDC/service.asmx?WSDL',
     },
   };
+
+  // WSCCOMU (Ventanilla Electrónica): nombre de servicio para el TRA de WSAA.
+  // AFIP/ARCA renombró el servicio en la migración 2026: pasó de 'veconsumer'
+  // (ahora "Servicio informado inexistente" en WSAA de producción) a
+  // 'veconsumerws'. Verificado 2026-09-10 contra wsaa.afip.gov.ar: con
+  // 'veconsumerws' WSAA emite el TA (o pide autorización del CUIT); con
+  // 'veconsumer' devuelve wsn.notFound. El endpoint del WSDL sigue siendo
+  // /ve-ws/services/veconsumer; sólo cambió el nombre de servicio del WSAA.
+  private static readonly VE_WSAA_SERVICE = 'veconsumerws';
+
+  // El WSDL de veconsumer solo publica binding SOAP 1.2
+  private static readonly VE_SOAP_OPTIONS: soap.IOptions = {
+    forceSoap12Headers: true,
+    wsdl_options: { timeout: 30000 },
+  };
+
+  // fechaDesde es obligatorio en el filter; AFIP solo permite consultar hasta 360 días atrás
+  private getVeFechaDesdeDefault(): string {
+    const d = new Date();
+    d.setDate(d.getDate() - 359);
+    return d.toISOString().slice(0, 10);
+  }
 
   constructor(
     private configService: ConfigService,
@@ -1771,9 +1794,29 @@ export class AfipService implements OnModuleInit {
         detalle.CondicionIVAReceptorId = condicionIva;
       }
 
+      // Comprobantes clase C (emisor Monotributo / no Responsable Inscripto):
+      // NO discriminan IVA. AFIP exige (errores 10047/10048/10071):
+      //   - ImpIVA = 0 y el objeto Iva ausente (no se informa alícuota).
+      //   - ImpNeto = SubTotal, con ImpTotConc e ImpOpEx en 0.
+      //   - ImpTotal = ImpNeto + ImpTrib.
+      // Normalizamos acá, sin importar qué neto/alícuota haya mandado el caller,
+      // así cualquier consumidor emite C correctamente.
+      const esClaseC = claseComprobante === 'C' || claseComprobante === 'FCE_C';
+      if (esClaseC) {
+        detalle.ImpIVA = 0;
+        detalle.ImpTotConc = 0;
+        detalle.ImpOpEx = 0;
+        detalle.ImpNeto =
+          Math.round(
+            (invoiceData.importeTotal - (invoiceData.importeTributos || 0)) *
+              100,
+          ) / 100;
+      }
+
       // Array de IVA - Requerido para Facturas A, B, M cuando hay IVA
-      // Según Manual ARCA-COMPG v4.0: debe enviarse el desglose de alícuotas
-      if (invoiceData.iva && invoiceData.iva.length > 0) {
+      // Según Manual ARCA-COMPG v4.0: debe enviarse el desglose de alícuotas.
+      // En clase C el objeto Iva NO debe informarse.
+      if (!esClaseC && invoiceData.iva && invoiceData.iva.length > 0) {
         detalle.Iva = {
           AlicIva: invoiceData.iva.map((iva) => ({
             Id: iva.Id,
@@ -1785,6 +1828,7 @@ export class AfipService implements OnModuleInit {
           `Array de IVA incluido con ${invoiceData.iva.length} alícuota(s)`,
         );
       } else if (
+        !esClaseC &&
         invoiceData.importeIva > 0 &&
         (claseComprobante === 'A' ||
           claseComprobante === 'B' ||
@@ -2556,9 +2600,8 @@ export class AfipService implements OnModuleInit {
       this.logger.log(`Filtros: ${JSON.stringify(filtros)}`);
     }
 
-    // Obtener ticket para el servicio veconsumerws
     const ticket = await this.getTicket(
-      'veconsumerws',
+      AfipService.VE_WSAA_SERVICE,
       certificado,
       clavePrivada,
       homologacion,
@@ -2570,7 +2613,7 @@ export class AfipService implements OnModuleInit {
     return new Promise((resolve, reject) => {
       soap.createClient(
         ventanillaUrl,
-        { wsdl_options: { timeout: 30000 } },
+        AfipService.VE_SOAP_OPTIONS,
         (err, client) => {
           if (err) {
             this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
@@ -2582,132 +2625,227 @@ export class AfipService implements OnModuleInit {
             return;
           }
 
-          // Construir el request según la especificación del PDF
+          // Construir el request según el WSDL de WSCCOMU. La raíz de
+          // RequestConsultarComunicaciones sólo admite <authRequest> y <filter>;
+          // la paginación (pagina / resultadosPorPagina) va DENTRO de <filter>,
+          // no como elementos sueltos en la raíz. Los elementos de <filter>
+          // deben respetar el orden del <xs:sequence name="Filter">:
+          // estado, fechaDesde, fechaHasta, comunicacionIdDesde,
+          // comunicacionIdHasta, tieneAdjunto, sistemaPublicadorId,
+          // pagina, resultadosPorPagina.
+          const buildRequest = (fechaDesdeEfectiva?: string) => {
+            const filter: any = {};
+            if (filtros?.estado !== undefined) {
+              filter.estado = filtros.estado;
+            }
+            if (fechaDesdeEfectiva) {
+              // Formato esperado: yyyy-MM-dd
+              filter.fechaDesde = fechaDesdeEfectiva;
+            }
+            if (filtros?.fechaHasta) {
+              filter.fechaHasta = filtros.fechaHasta;
+            }
+            if (filtros?.idComunicacionDesde !== undefined) {
+              filter.comunicacionIdDesde = filtros.idComunicacionDesde;
+            }
+            if (filtros?.idComunicacionHasta !== undefined) {
+              filter.comunicacionIdHasta = filtros.idComunicacionHasta;
+            }
+            if (filtros?.idSistemaPublicador !== undefined) {
+              filter.sistemaPublicadorId = filtros.idSistemaPublicador;
+            }
+            filter.pagina = pagina;
+            filter.resultadosPorPagina = itemsPorPagina;
+
+            return {
+              authRequest: {
+                token: ticket.token,
+                sign: ticket.sign,
+                cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
+              },
+              filter,
+            };
+          };
+          // El WSDL exige filter con fechaDesde (antigüedad máxima consultable: 360 días)
+          // y la paginación viaja dentro de filter (pagina / resultadosPorPagina).
+          // Las claves se agregan en el orden del WSDL: node-soap serializa según orden de inserción.
+          const filter: any = {};
+          if (filtros?.estado !== undefined) {
+            filter.estado = filtros.estado;
+          }
+          filter.fechaDesde =
+            filtros?.fechaDesde || this.getVeFechaDesdeDefault();
+          if (filtros?.fechaHasta) {
+            filter.fechaHasta = filtros.fechaHasta;
+          }
+          if (filtros?.idComunicacionDesde !== undefined) {
+            filter.comunicacionIdDesde = filtros.idComunicacionDesde;
+          }
+          if (filtros?.idComunicacionHasta !== undefined) {
+            filter.comunicacionIdHasta = filtros.idComunicacionHasta;
+          }
+          if (filtros?.idSistemaPublicador !== undefined) {
+            filter.sistemaPublicadorId = filtros.idSistemaPublicador;
+          }
+          filter.pagina = pagina;
+          filter.resultadosPorPagina = itemsPorPagina;
+
           const request: any = {
             authRequest: {
               token: ticket.token,
               sign: ticket.sign,
               cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
             },
-            pagina: pagina,
-            itemsPorPagina: itemsPorPagina,
+            filter,
           };
-
-          // Agregar filtros si existen
-          if (filtros) {
-            request.filter = {};
-
-            if (filtros.estado !== undefined) {
-              request.filter.estado = filtros.estado;
-            }
-            if (filtros.fechaDesde) {
-              // Formato esperado: yyyy-MM-dd
-              request.filter.fechaDesde = filtros.fechaDesde;
-            }
-            if (filtros.fechaHasta) {
-              request.filter.fechaHasta = filtros.fechaHasta;
-            }
-            if (filtros.idSistemaPublicador !== undefined) {
-              request.filter.idSistemaPublicador = filtros.idSistemaPublicador;
-            }
-            if (filtros.idComunicacionDesde !== undefined) {
-              request.filter.idComunicacionDesde = filtros.idComunicacionDesde;
-            }
-            if (filtros.idComunicacionHasta !== undefined) {
-              request.filter.idComunicacionHasta = filtros.idComunicacionHasta;
-            }
-          }
 
           this.logger.log('Request a VE: ' + JSON.stringify(request, null, 2));
 
-          client.consultarComunicaciones(request, (err: any, result: any) => {
-            if (err) {
-              this.logger.error(
-                `Error en consultarComunicaciones: ${err.message}`,
-              );
-              reject(
-                new BadRequestException(
-                  `Error al consultar comunicaciones: ${err.message}`,
+          const procesarRespuesta = (result: any) => {
+            // Parsear respuesta según estructura del PDF
+            const respuestaPaginada =
+              result?.consultarComunicacionesResponse?.RespuestaPaginada ||
+              result?.RespuestaPaginada ||
+              result;
+
+            // Según el WSDL, RespuestaPaginada.items es de tipo Items y sus
+            // hijos son <ComunicacionSimplificada> (no <item>). node-soap los
+            // expone bajo esa key. Contemplamos variantes por robustez.
+            const items =
+              respuestaPaginada?.items?.ComunicacionSimplificada ??
+              respuestaPaginada?.items?.item ??
+              respuestaPaginada?.items ??
+              [];
+            const comunicacionesArray = Array.isArray(items)
+              ? items
+              : items
+                ? [items]
+                : [];
+
+            const comunicaciones = comunicacionesArray.map((c: any) => ({
+              idComunicacion: Number(c.idComunicacion || c.id),
+              cuitDestinatario: String(c.cuitDestinatario || cuitRepresentada),
+              fechaPublicacion: c.fechaPublicacion || '',
+              fechaVencimiento: c.fechaVencimiento || undefined,
+              sistemaPublicador: Number(
+                c.sistemaPublicador || c.idSistemaPublicador || 0,
+              ),
+              sistemaPublicadorDesc:
+                c.sistemaPublicadorDesc || c.descSistemaPublicador || '',
+              estado: Number(c.estado || 1),
+              estadoDesc:
+                c.estadoDesc ||
+                this.getEstadoDescripcion(Number(c.estado || 1)),
+              asunto: this.normalizarNumerosAfip(c.asunto || '') || '',
+              prioridad: c.prioridad ? Number(c.prioridad) : undefined,
+              tieneAdjunto:
+                c.tieneAdjunto === true ||
+                c.tieneAdjunto === 'true' ||
+                c.tieneAdjunto === 1,
+              referencia1:
+                this.normalizarNumerosAfip(c.referencia1) || undefined,
+              referencia2:
+                this.normalizarNumerosAfip(c.referencia2) || undefined,
+            }));
+
+            return {
+              paginacion: {
+                pagina: Number(respuestaPaginada?.pagina || pagina),
+                totalPaginas: Number(respuestaPaginada?.totalPaginas || 1),
+                itemsPorPagina: Number(
+                  respuestaPaginada?.itemsPorPagina || itemsPorPagina,
                 ),
-              );
-              return;
-            }
-
-            try {
-              this.logger.log('Respuesta recibida de VE');
-
-              // Parsear respuesta según estructura del PDF
-              const respuestaPaginada =
-                result?.consultarComunicacionesResponse?.RespuestaPaginada ||
-                result?.RespuestaPaginada ||
-                result;
-
-              const items =
-                respuestaPaginada?.items?.item ||
-                respuestaPaginada?.items ||
-                [];
-              const comunicacionesArray = Array.isArray(items)
-                ? items
-                : items
-                  ? [items]
-                  : [];
-
-              // Mapear las comunicaciones al formato de respuesta
-              const comunicaciones = comunicacionesArray.map((c: any) => ({
-                idComunicacion: Number(c.idComunicacion || c.id),
-                cuitDestinatario: String(
-                  c.cuitDestinatario || cuitRepresentada,
+                totalItems: Number(
+                  respuestaPaginada?.totalItems || comunicaciones.length,
                 ),
-                fechaPublicacion: c.fechaPublicacion || '',
-                fechaVencimiento: c.fechaVencimiento || undefined,
-                sistemaPublicador: Number(
-                  c.sistemaPublicador || c.idSistemaPublicador || 0,
-                ),
-                sistemaPublicadorDesc:
-                  c.sistemaPublicadorDesc || c.descSistemaPublicador || '',
-                estado: Number(c.estado || 1),
-                estadoDesc:
-                  c.estadoDesc ||
-                  this.getEstadoDescripcion(Number(c.estado || 1)),
-                asunto: c.asunto || '',
-                prioridad: c.prioridad ? Number(c.prioridad) : undefined,
-                tieneAdjunto:
-                  c.tieneAdjunto === true ||
-                  c.tieneAdjunto === 'true' ||
-                  c.tieneAdjunto === 1,
-                referencia1: c.referencia1 || undefined,
-                referencia2: c.referencia2 || undefined,
-              }));
+              },
+              comunicaciones,
+            };
+          };
 
-              const response = {
-                paginacion: {
-                  pagina: Number(respuestaPaginada?.pagina || pagina),
-                  totalPaginas: Number(respuestaPaginada?.totalPaginas || 1),
-                  itemsPorPagina: Number(
-                    respuestaPaginada?.itemsPorPagina || itemsPorPagina,
+          // WSCCOMU sólo expone comunicaciones desde una fecha mínima. Si el
+          // caller no pasó fechaDesde (o pasó una anterior al piso), AFIP rechaza
+          // con "Error 101: Fecha desde no soportada. Mínima fecha [YYYY-MM-DD]".
+          // Reintentamos UNA vez con esa fecha exacta: así no hay que hardcodear
+          // el piso y se autoajusta si la ventana avanza.
+          const ejecutar = (
+            fechaDesdeEfectiva: string | undefined,
+            esReintento: boolean,
+          ) => {
+            const request = buildRequest(fechaDesdeEfectiva);
+            this.logger.log(
+              'Request a VE: ' + JSON.stringify(request, null, 2),
+            );
+
+            client.consultarComunicaciones(request, (err: any, result: any) => {
+              if (err) {
+                const msg = err.message || '';
+                const min = msg.match(
+                  /M[ií]nima fecha\s*\[(\d{4}-\d{2}-\d{2})\]/,
+                );
+                if (min && !esReintento) {
+                  this.logger.warn(
+                    `AFIP exige fechaDesde >= ${min[1]}; reintentando con esa fecha`,
+                  );
+                  ejecutar(min[1], true);
+                  return;
+                }
+                this.logger.error(`Error en consultarComunicaciones: ${msg}`);
+                // DIAG TEMPORAL: ante "Cannot parse response" node-soap adjunta el
+                // cuerpo crudo y la respuesta. Logueamos content-type + primeros
+                // 800 chars para saber si AFIP devuelve MTOM/multipart, HTML o
+                // un fault fuera de <Body>. Quitar tras diagnosticar.
+                if (/cannot parse response/i.test(msg)) {
+                  try {
+                    const ct =
+                      err?.response?.headers?.['content-type'] ??
+                      err?.response?.headers?.['Content-Type'] ??
+                      '(sin content-type)';
+                    const rawBody =
+                      typeof err?.body === 'string'
+                        ? err.body
+                        : JSON.stringify(err?.body ?? '');
+                    this.logger.error(
+                      `DIAG VE content-type=${ct} status=${err?.response?.status} bodyLen=${rawBody?.length}`,
+                    );
+                    this.logger.error(
+                      `DIAG VE body[0..800]=${(rawBody || '').slice(0, 800)}`,
+                    );
+                  } catch (diagErr: any) {
+                    this.logger.error(
+                      `DIAG VE fallo al loguear body: ${diagErr?.message}`,
+                    );
+                  }
+                }
+                reject(
+                  new BadRequestException(
+                    `Error al consultar comunicaciones: ${msg}`,
                   ),
-                  totalItems: Number(
-                    respuestaPaginada?.totalItems || comunicaciones.length,
-                  ),
-                },
-                comunicaciones,
-              };
+                );
+                return;
+              }
 
-              this.logger.log(
-                `Comunicaciones encontradas: ${response.paginacion.totalItems}`,
-              );
-              resolve(response);
-            } catch (parseError: any) {
-              this.logger.error(
-                `Error al parsear respuesta VE: ${parseError.message}`,
-              );
-              reject(
-                new BadRequestException(
-                  `Error al procesar respuesta de Ventanilla Electrónica: ${parseError.message}`,
-                ),
-              );
-            }
-          });
+              try {
+                this.logger.log('Respuesta recibida de VE');
+                const response = procesarRespuesta(result);
+                this.logger.log(
+                  `Comunicaciones encontradas: ${response.paginacion.totalItems}`,
+                );
+                resolve(response);
+              } catch (parseError: any) {
+                this.logger.error(
+                  `Error al parsear respuesta VE: ${parseError.message}`,
+                );
+                reject(
+                  new BadRequestException(
+                    `Error al procesar respuesta de Ventanilla Electrónica: ${parseError.message}`,
+                  ),
+                );
+              }
+            });
+          };
+
+          ejecutar(filtros?.fechaDesde, false);
         },
       );
     });
@@ -2761,7 +2899,7 @@ export class AfipService implements OnModuleInit {
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
     const ticket = await this.getTicket(
-      'veconsumerws',
+      AfipService.VE_WSAA_SERVICE,
       certificado,
       clavePrivada,
       homologacion,
@@ -2773,7 +2911,7 @@ export class AfipService implements OnModuleInit {
     return new Promise((resolve, reject) => {
       soap.createClient(
         ventanillaUrl,
-        { wsdl_options: { timeout: 30000 } },
+        AfipService.VE_SOAP_OPTIONS,
         (err, client) => {
           if (err) {
             this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
@@ -2785,6 +2923,7 @@ export class AfipService implements OnModuleInit {
             return;
           }
 
+          // RequestConsumirComunicacion = { authRequest, idComunicacion, incluirAdjuntos? }
           const request: any = {
             authRequest: {
               token: ticket.token,
@@ -2792,6 +2931,7 @@ export class AfipService implements OnModuleInit {
               cuitRepresentada: cuitRepresentada.replace(/-/g, ''),
             },
             idComunicacion: idComunicacion,
+            incluirAdjuntos: incluirAdjuntos,
           };
 
           this.logger.log(
@@ -2799,109 +2939,304 @@ export class AfipService implements OnModuleInit {
               JSON.stringify(request, null, 2),
           );
 
-          client.consumirComunicacion(request, (err: any, result: any) => {
-            if (err) {
-              this.logger.error(
-                `Error en consumirComunicacion: ${err.message}`,
-              );
-              reject(
-                new BadRequestException(
-                  `Error al consumir comunicación: ${err.message}`,
-                ),
-              );
-              return;
-            }
-
-            try {
-              this.logger.log(
-                'Respuesta recibida de VE (consumirComunicacion)',
-              );
-
-              const comunicacion =
-                result?.consumirComunicacionResponse?.Comunicacion ||
-                result?.Comunicacion ||
-                result;
-
-              // Parsear adjuntos si existen
-              let adjuntos: any[] = [];
-              if (comunicacion.adjuntos?.adjunto) {
-                const adjuntosData = Array.isArray(
-                  comunicacion.adjuntos.adjunto,
-                )
-                  ? comunicacion.adjuntos.adjunto
-                  : [comunicacion.adjuntos.adjunto];
-
-                adjuntos = adjuntosData.map((adj: any) => ({
-                  nombre: adj.nombre || adj.fileName || '',
-                  tipoMime:
-                    adj.tipoMime || adj.mimeType || 'application/octet-stream',
-                  contenidoBase64: incluirAdjuntos
-                    ? adj.contenido || adj.content || ''
-                    : undefined,
-                  tamanio: adj.tamanio ? Number(adj.tamanio) : undefined,
-                }));
+          client.consumirComunicacion(
+            request,
+            async (err: any, result: any) => {
+              if (err) {
+                this.logger.error(
+                  `Error en consumirComunicacion: ${err.message}`,
+                );
+                reject(
+                  new BadRequestException(
+                    `Error al consumir comunicación: ${err.message}`,
+                  ),
+                );
+                return;
               }
 
-              const response = {
-                idComunicacion: Number(
-                  comunicacion.idComunicacion ||
-                    comunicacion.id ||
-                    idComunicacion,
-                ),
-                cuitDestinatario: String(
-                  comunicacion.cuitDestinatario || cuitRepresentada,
-                ),
-                fechaPublicacion: comunicacion.fechaPublicacion || '',
-                fechaVencimiento: comunicacion.fechaVencimiento || undefined,
-                sistemaPublicador: Number(
-                  comunicacion.sistemaPublicador ||
-                    comunicacion.idSistemaPublicador ||
-                    0,
-                ),
-                sistemaPublicadorDesc:
-                  comunicacion.sistemaPublicadorDesc ||
-                  comunicacion.descSistemaPublicador ||
-                  '',
-                estado: Number(comunicacion.estado || 2), // 2 = Leída (ya que la estamos consumiendo)
-                estadoDesc:
-                  comunicacion.estadoDesc ||
-                  this.getEstadoDescripcion(Number(comunicacion.estado || 2)),
-                asunto: comunicacion.asunto || '',
-                prioridad: comunicacion.prioridad
-                  ? Number(comunicacion.prioridad)
-                  : undefined,
-                tieneAdjunto:
-                  adjuntos.length > 0 || comunicacion.tieneAdjunto === true,
-                referencia1: comunicacion.referencia1 || undefined,
-                referencia2: comunicacion.referencia2 || undefined,
-                cuerpo:
-                  comunicacion.cuerpo ||
-                  comunicacion.mensaje ||
-                  comunicacion.body ||
-                  '',
-                adjuntos: adjuntos.length > 0 ? adjuntos : undefined,
-                fechaLectura:
-                  comunicacion.fechaLectura || new Date().toISOString(),
-              };
+              try {
+                this.logger.log(
+                  'Respuesta recibida de VE (consumirComunicacion)',
+                );
 
-              this.logger.log(
-                `Comunicación leída exitosamente: ${response.idComunicacion}`,
-              );
-              resolve(response);
-            } catch (parseError: any) {
-              this.logger.error(
-                `Error al parsear comunicación: ${parseError.message}`,
-              );
-              reject(
-                new BadRequestException(
-                  `Error al procesar comunicación: ${parseError.message}`,
-                ),
-              );
-            }
-          });
+                const comunicacion =
+                  result?.consumirComunicacionResponse?.Comunicacion ||
+                  result?.Comunicacion ||
+                  result;
+
+                // Parsear adjuntos si existen. Según el WSDL, cada <adjunto> tiene
+                // filename, content (base64Binary) y contentSize.
+                let adjuntos: any[] = [];
+                if (comunicacion.adjuntos?.adjunto) {
+                  const adjuntosData = Array.isArray(
+                    comunicacion.adjuntos.adjunto,
+                  )
+                    ? comunicacion.adjuntos.adjunto
+                    : [comunicacion.adjuntos.adjunto];
+
+                  adjuntos = adjuntosData.map((adj: any) => {
+                    const rawContent = adj.content || adj.contenido;
+                    return {
+                      nombre: adj.filename || adj.nombre || adj.fileName || '',
+                      tipoMime:
+                        adj.tipoMime ||
+                        adj.mimeType ||
+                        'application/octet-stream',
+                      contenidoBase64:
+                        incluirAdjuntos && rawContent
+                          ? Buffer.isBuffer(rawContent)
+                            ? rawContent.toString('base64')
+                            : String(rawContent)
+                          : undefined,
+                      tamanio: adj.contentSize
+                        ? Number(adj.contentSize)
+                        : adj.tamanio
+                          ? Number(adj.tamanio)
+                          : undefined,
+                    };
+                  });
+
+                  // content viene como referencia XOP/MTOM { Include: { href } }.
+                  // node-soap v1.6 descarta la parte MIME con el binario (queda solo
+                  // el XML en lastResponse), así que re-pedimos la respuesta cruda
+                  // (arraybuffer) reusando el envelope que armó node-soap y parseamos
+                  // el multipart/related nosotros.
+                  const hrefsPend: string[] = adjuntosData
+                    .map(
+                      (a: any) =>
+                        a?.content?.Include?.attributes?.href ??
+                        a?.content?.Include?.href,
+                    )
+                    .filter(Boolean);
+
+                  // Partes binarias del multipart crudo (excluye la raíz xop+xml).
+                  // OJO: los Content-ID del re-fetch NO coinciden con los que parseó
+                  // node-soap (es otra request; CXF genera un cid nuevo por respuesta),
+                  // así que NO se puede matchear por cid entre requests: mapeamos las
+                  // partes binarias por POSICIÓN a los adjuntos que traen xop:Include.
+                  let binaryParts: Buffer[] = [];
+                  if (incluirAdjuntos && hrefsPend.length > 0) {
+                    const endpoint = ventanillaUrl.replace(/\?wsdl$/i, '');
+                    const reqCt =
+                      (client as any).lastRequestHeaders?.['Content-Type'] ??
+                      (client as any).lastRequestHeaders?.['content-type'];
+                    binaryParts = await this.fetchMtomBinaryParts(
+                      endpoint,
+                      (client as any).lastRequest,
+                      reqCt,
+                    );
+                  }
+                  this.logger.log(
+                    `MTOM binaryParts=${binaryParts.length} sizes=[${binaryParts
+                      .map((b) => b.length)
+                      .join(',')}] adjuntos=${adjuntosData.length}`,
+                  );
+
+                  // Cursor sobre las partes binarias: cada adjunto con xop:Include
+                  // consume la siguiente parte en orden de aparición.
+                  let xopCursor = 0;
+                  const extraerBase64 = (adj: any): string => {
+                    let v: any = adj.content ?? adj.contenido;
+                    if (v && typeof v === 'object' && !Buffer.isBuffer(v)) {
+                      const isXop = !!(
+                        v.Include?.attributes?.href ?? v.Include?.href
+                      );
+                      if (isXop) {
+                        const buf = binaryParts[xopCursor++];
+                        return buf ? buf.toString('base64') : '';
+                      }
+                      if (v.type === 'Buffer' && Array.isArray(v.data)) {
+                        v = Buffer.from(v.data);
+                      } else {
+                        v =
+                          v.$value ??
+                          v._ ??
+                          v.value ??
+                          v.content ??
+                          v.data ??
+                          '';
+                      }
+                    }
+                    if (Buffer.isBuffer(v)) return v.toString('base64');
+                    return typeof v === 'string' ? v : '';
+                  };
+
+                  adjuntos = adjuntosData.map((adj: any) => {
+                    const contenidoBase64 = !incluirAdjuntos
+                      ? undefined
+                      : extraerBase64(adj);
+                    return {
+                      nombre:
+                        adj.filename || adj.fileName || adj.nombre || 'adjunto',
+                      tipoMime:
+                        adj.tipoMime ||
+                        adj.mimeType ||
+                        'application/octet-stream',
+                      contenidoBase64,
+                      tamanio: adj.contentSize
+                        ? Number(adj.contentSize)
+                        : adj.tamanio
+                          ? Number(adj.tamanio)
+                          : undefined,
+                    };
+                  });
+                }
+
+                const response = {
+                  idComunicacion: Number(
+                    comunicacion.idComunicacion ||
+                      comunicacion.id ||
+                      idComunicacion,
+                  ),
+                  cuitDestinatario: String(
+                    comunicacion.cuitDestinatario || cuitRepresentada,
+                  ),
+                  fechaPublicacion: comunicacion.fechaPublicacion || '',
+                  fechaVencimiento: comunicacion.fechaVencimiento || undefined,
+                  sistemaPublicador: Number(
+                    comunicacion.sistemaPublicador ||
+                      comunicacion.idSistemaPublicador ||
+                      0,
+                  ),
+                  sistemaPublicadorDesc:
+                    comunicacion.sistemaPublicadorDesc ||
+                    comunicacion.descSistemaPublicador ||
+                    '',
+                  estado: Number(comunicacion.estado || 2), // 2 = Leída (ya que la estamos consumiendo)
+                  estadoDesc:
+                    comunicacion.estadoDesc ||
+                    this.getEstadoDescripcion(Number(comunicacion.estado || 2)),
+                  asunto:
+                    this.normalizarNumerosAfip(comunicacion.asunto || '') || '',
+                  prioridad: comunicacion.prioridad
+                    ? Number(comunicacion.prioridad)
+                    : undefined,
+                  tieneAdjunto:
+                    adjuntos.length > 0 || comunicacion.tieneAdjunto === true,
+                  referencia1:
+                    this.normalizarNumerosAfip(comunicacion.referencia1) ||
+                    undefined,
+                  referencia2:
+                    this.normalizarNumerosAfip(comunicacion.referencia2) ||
+                    undefined,
+                  cuerpo: this.normalizarNumerosAfip(
+                    comunicacion.cuerpo ||
+                      comunicacion.mensaje ||
+                      comunicacion.body ||
+                      '',
+                  ),
+                  adjuntos: adjuntos.length > 0 ? adjuntos : undefined,
+                  fechaLectura:
+                    comunicacion.fechaLectura || new Date().toISOString(),
+                };
+
+                this.logger.log(
+                  `Comunicación leída exitosamente: ${response.idComunicacion}`,
+                );
+                resolve(response);
+              } catch (parseError: any) {
+                this.logger.error(
+                  `Error al parsear comunicación: ${parseError.message}`,
+                );
+                reject(
+                  new BadRequestException(
+                    `Error al procesar comunicación: ${parseError.message}`,
+                  ),
+                );
+              }
+            },
+          );
         },
       );
     });
+  }
+
+  /**
+   * Re-pide una respuesta SOAP 1.2 / MTOM como binario crudo. node-soap descarta
+   * las partes MIME con los adjuntos, así que reenviamos el mismo envelope con
+   * axios (responseType arraybuffer) y devolvemos el multipart/related completo
+   * (byte-exacto) para poder extraer los adjuntos. Devuelve null si falla.
+   */
+  private async fetchMtomBinaryParts(
+    endpoint: string,
+    envelope: string,
+    contentType?: string,
+  ): Promise<Buffer[]> {
+    if (!envelope) return [];
+    try {
+      const res = await axios.post(endpoint, envelope, {
+        headers: {
+          'Content-Type': contentType || 'application/soap+xml; charset=utf-8',
+        },
+        responseType: 'arraybuffer',
+        timeout: 30000,
+        validateStatus: () => true,
+      });
+      const buf = Buffer.from(res.data);
+      const respCt = String(res.headers['content-type'] ?? '');
+      this.logger.log(
+        `fetchMtomMultipart: status=${res.status} ct=${respCt} bytes=${buf.length}`,
+      );
+      if (res.status < 200 || res.status >= 300) return [];
+      // El boundary confiable viene del header de la respuesta, no del body.
+      const m = /boundary="?([^";]+)"?/i.exec(respCt);
+      return this.parseMtomBinaryParts(buf, m ? m[1] : undefined);
+    } catch (e: any) {
+      this.logger.error(`fetchMtomMultipart error: ${e?.message ?? e}`);
+      return [];
+    }
+  }
+
+  /**
+   * Parsea un multipart/related (MTOM/XOP) crudo y devuelve las partes binarias
+   * en orden, EXCLUYENDO la parte raíz `application/xop+xml` (el sobre SOAP).
+   * Se trabaja en `latin1` para ubicar delimitadores/headers byte-exacto y luego
+   * se recortan los cuerpos sobre el Buffer original (sin corromper el binario).
+   * `boundary` viene del header Content-Type de la respuesta; si falta, se cae a
+   * detectarlo desde la primera línea del cuerpo.
+   */
+  private parseMtomBinaryParts(raw: Buffer, boundary?: string): Buffer[] {
+    const s = raw.toString('latin1');
+    let delim: string;
+    if (boundary) {
+      delim = '--' + boundary;
+    } else {
+      const firstCrlf = s.indexOf('\r\n');
+      if (firstCrlf === -1) return [];
+      delim = s.slice(0, firstCrlf).trim(); // "--<boundary>"
+    }
+    if (!delim.startsWith('--')) return [];
+
+    // Posiciones de cada delimitador de parte.
+    const positions: number[] = [];
+    let p = s.indexOf(delim, 0);
+    while (p !== -1) {
+      positions.push(p);
+      p = s.indexOf(delim, p + delim.length);
+    }
+    this.logger.log(
+      `parseMtomBinaryParts: delim="${delim.slice(0, 24)}..." delims=${positions.length}`,
+    );
+
+    const parts: Buffer[] = [];
+    for (let i = 0; i < positions.length - 1; i++) {
+      let partStart = positions[i] + delim.length;
+      if (s.slice(partStart, partStart + 2) === '--') continue; // terminador
+      if (s.slice(partStart, partStart + 2) === '\r\n') partStart += 2;
+
+      const partEnd = positions[i + 1];
+      const headerEnd = s.indexOf('\r\n\r\n', partStart);
+      if (headerEnd === -1 || headerEnd >= partEnd) continue;
+
+      const headers = s.slice(partStart, headerEnd);
+      if (/application\/xop\+xml/i.test(headers)) continue; // raíz SOAP
+
+      const bodyStart = headerEnd + 4;
+      let bodyEnd = partEnd - 2; // descarta el \r\n previo al delimitador
+      if (bodyEnd < bodyStart) bodyEnd = bodyStart;
+      parts.push(raw.subarray(bodyStart, bodyEnd));
+    }
+    return parts;
   }
 
   /**
@@ -2926,7 +3261,7 @@ export class AfipService implements OnModuleInit {
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
     const ticket = await this.getTicket(
-      'veconsumerws',
+      AfipService.VE_WSAA_SERVICE,
       certificado,
       clavePrivada,
       homologacion,
@@ -2938,7 +3273,7 @@ export class AfipService implements OnModuleInit {
     return new Promise((resolve, reject) => {
       soap.createClient(
         ventanillaUrl,
-        { wsdl_options: { timeout: 30000 } },
+        AfipService.VE_SOAP_OPTIONS,
         (err, client) => {
           if (err) {
             this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
@@ -2992,7 +3327,7 @@ export class AfipService implements OnModuleInit {
                 const response = sistemasArray.map((s: any) => ({
                   id: Number(s.id),
                   descripcion: s.descripcion || '',
-                  certCN: s.certCN || undefined,
+                  certCN: s.certCNs || s.certCN || undefined,
                   subservicios: s.subservicios?.subservicio || undefined,
                 }));
 
@@ -3036,7 +3371,7 @@ export class AfipService implements OnModuleInit {
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
 
     const ticket = await this.getTicket(
-      'veconsumerws',
+      AfipService.VE_WSAA_SERVICE,
       certificado,
       clavePrivada,
       homologacion,
@@ -3048,7 +3383,7 @@ export class AfipService implements OnModuleInit {
     return new Promise((resolve, reject) => {
       soap.createClient(
         ventanillaUrl,
-        { wsdl_options: { timeout: 30000 } },
+        AfipService.VE_SOAP_OPTIONS,
         (err, client) => {
           if (err) {
             this.logger.error(`Error al crear cliente SOAP VE: ${err.message}`);
@@ -3131,6 +3466,29 @@ export class AfipService implements OnModuleInit {
       2: 'Leída',
     };
     return estados[estado] || `Estado ${estado}`;
+  }
+
+  /**
+   * AFIP/ARCA a veces compone el texto de las comunicaciones con números en
+   * notación científica al estilo .NET (ej: "monto $ 5e+006" en vez de
+   * "$ 5.000.000"; el exponente con relleno de ceros "+006" es formato
+   * printf/.NET, no JS). Esto llega literal dentro del string y rompe la
+   * lectura del cuerpo, asunto y referencias. Los expande a número legible con
+   * separador de miles es-AR. Best-effort: lo que no matchea se devuelve igual.
+   */
+  private normalizarNumerosAfip(texto: string | undefined): string | undefined {
+    if (!texto) return texto;
+    // Mantisa (con posible decimal . o ,) seguida de e/E y exponente con signo.
+    return texto.replace(
+      /(\d+(?:[.,]\d+)?)[eE]([+-]?\d+)/g,
+      (match, mantissa: string, exp: string) => {
+        const valor = Number(`${mantissa.replace(',', '.')}e${Number(exp)}`);
+        if (!Number.isFinite(valor)) return match;
+        return Number.isInteger(valor)
+          ? valor.toLocaleString('es-AR')
+          : valor.toLocaleString('es-AR', { maximumFractionDigits: 2 });
+      },
+    );
   }
 
   // ============================================
@@ -4020,7 +4378,8 @@ export class AfipService implements OnModuleInit {
       ImpTotal: params.importeTotal,
       CodAutorizacion: params.codAutorizacion,
     };
-    if (params.docTipoReceptor) cbteReq.DocTipoReceptor = params.docTipoReceptor;
+    if (params.docTipoReceptor)
+      cbteReq.DocTipoReceptor = params.docTipoReceptor;
     if (params.docNroReceptor) cbteReq.DocNroReceptor = params.docNroReceptor;
     if (params.opcionales && params.opcionales.length > 0) {
       cbteReq.Opcionales = {
@@ -4126,17 +4485,13 @@ export class AfipService implements OnModuleInit {
     });
   }
 
-  private extractWscdcList(
-    raw: any,
-  ): Array<{ code: number; msg: string }> {
+  private extractWscdcList(raw: any): Array<{ code: number; msg: string }> {
     if (!raw) return [];
     const arr = Array.isArray(raw) ? raw : [raw];
-    return arr
-      .filter(Boolean)
-      .map((x: any) => ({
-        code: Number(x.Code ?? x.code ?? 0),
-        msg: String(x.Msg ?? x.msg ?? ''),
-      }));
+    return arr.filter(Boolean).map((x: any) => ({
+      code: Number(x.Code ?? x.code ?? 0),
+      msg: String(x.Msg ?? x.msg ?? ''),
+    }));
   }
 }
 
@@ -4146,20 +4501,44 @@ export class AfipService implements OnModuleInit {
  * así que el detalle se serializa en este orden; campos extra quedan al final.
  */
 const WSFE_DET_ORDEN = [
-  'Concepto', 'DocTipo', 'DocNro', 'CbteDesde', 'CbteHasta', 'CbteFch',
-  'ImpTotal', 'ImpTotConc', 'ImpNeto', 'ImpOpEx', 'ImpTrib', 'ImpIVA',
-  'FchServDesde', 'FchServHasta', 'FchVtoPago', 'MonId', 'MonCotiz',
-  'CanMisMonExt', 'CondicionIVAReceptorId', 'CbtesAsoc', 'Tributos', 'Iva',
-  'Opcionales', 'Compradores', 'PeriodoAsoc', 'Actividades',
+  'Concepto',
+  'DocTipo',
+  'DocNro',
+  'CbteDesde',
+  'CbteHasta',
+  'CbteFch',
+  'ImpTotal',
+  'ImpTotConc',
+  'ImpNeto',
+  'ImpOpEx',
+  'ImpTrib',
+  'ImpIVA',
+  'FchServDesde',
+  'FchServHasta',
+  'FchVtoPago',
+  'MonId',
+  'MonCotiz',
+  'CanMisMonExt',
+  'CondicionIVAReceptorId',
+  'CbtesAsoc',
+  'Tributos',
+  'Iva',
+  'Opcionales',
+  'Compradores',
+  'PeriodoAsoc',
+  'Actividades',
 ];
 
-function ordenarDetalleWsfe(detalle: Record<string, unknown>): Record<string, unknown> {
+function ordenarDetalleWsfe(
+  detalle: Record<string, unknown>,
+): Record<string, unknown> {
   const ordenado: Record<string, unknown> = {};
   for (const key of WSFE_DET_ORDEN) {
     if (detalle[key] !== undefined) ordenado[key] = detalle[key];
   }
   for (const key of Object.keys(detalle)) {
-    if (!(key in ordenado) && detalle[key] !== undefined) ordenado[key] = detalle[key];
+    if (!(key in ordenado) && detalle[key] !== undefined)
+      ordenado[key] = detalle[key];
   }
   return ordenado;
 }
