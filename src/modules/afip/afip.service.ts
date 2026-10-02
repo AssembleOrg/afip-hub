@@ -1764,9 +1764,11 @@ export class AfipService implements OnModuleInit {
         );
       }
 
-      // Incluir condición IVA del receptor (obligatorio desde 01/02/2026)
+      // Incluir condición IVA del receptor (obligatorio, RG 5616).
+      // El nombre del campo en WSFEv1 es CondicionIVAReceptorId; con otro nombre
+      // ARCA lo ignora y devuelve la observación 10245.
       if (condicionIva) {
-        detalle.IvaCond = condicionIva;
+        detalle.CondicionIVAReceptorId = condicionIva;
       }
 
       // Array de IVA - Requerido para Facturas A, B, M cuando hay IVA
@@ -1914,7 +1916,7 @@ export class AfipService implements OnModuleInit {
             CbteTipo: invoiceData.tipoComprobante,
           },
           FeDetReq: {
-            FECAEDetRequest: detalle,
+            FECAEDetRequest: ordenarDetalleWsfe(detalle),
           },
         },
       };
@@ -4136,4 +4138,28 @@ export class AfipService implements OnModuleInit {
         msg: String(x.Msg ?? x.msg ?? ''),
       }));
   }
+}
+
+/**
+ * Orden de los campos de FECAEDetRequest según el WSDL de WSFEv1.
+ * El servicio es .NET (XmlSerializer) y valida la secuencia de elementos,
+ * así que el detalle se serializa en este orden; campos extra quedan al final.
+ */
+const WSFE_DET_ORDEN = [
+  'Concepto', 'DocTipo', 'DocNro', 'CbteDesde', 'CbteHasta', 'CbteFch',
+  'ImpTotal', 'ImpTotConc', 'ImpNeto', 'ImpOpEx', 'ImpTrib', 'ImpIVA',
+  'FchServDesde', 'FchServHasta', 'FchVtoPago', 'MonId', 'MonCotiz',
+  'CanMisMonExt', 'CondicionIVAReceptorId', 'CbtesAsoc', 'Tributos', 'Iva',
+  'Opcionales', 'Compradores', 'PeriodoAsoc', 'Actividades',
+];
+
+function ordenarDetalleWsfe(detalle: Record<string, unknown>): Record<string, unknown> {
+  const ordenado: Record<string, unknown> = {};
+  for (const key of WSFE_DET_ORDEN) {
+    if (detalle[key] !== undefined) ordenado[key] = detalle[key];
+  }
+  for (const key of Object.keys(detalle)) {
+    if (!(key in ordenado) && detalle[key] !== undefined) ordenado[key] = detalle[key];
+  }
+  return ordenado;
 }
