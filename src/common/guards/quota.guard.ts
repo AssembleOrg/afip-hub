@@ -73,7 +73,8 @@ export class QuotaGuard implements CanActivate {
     const snapshot = await this.usageService.getCurrentSnapshot(org.id);
     const isPdf = billable.kind === UsageKind.PDF;
     const used = isPdf ? snapshot.pdfCount : snapshot.billableCount;
-    const limit = isPdf ? org.pdfLimit : org.requestsLimit;
+    // Los comprobantes de regalo (fallas nuestras, incidentes) amplían el cupo.
+    const limit = isPdf ? org.pdfLimit : org.requestsLimit + snapshot.bonusCount;
     const overagePrice = isPdf ? org.pdfOveragePriceUsd : org.overagePriceUsd;
     const usedAfter = used + billable.cost;
     const allowsOverage = canChargeOverage(org, overagePrice);

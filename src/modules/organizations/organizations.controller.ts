@@ -12,18 +12,24 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { OrganizationsService } from './organizations.service';
-import { ChangePlanDto } from './dto';
+import { ChangePlanDto, UsageCreditDto } from './dto';
+import { UsageService } from '@/modules/usage/usage.service';
+import { AuditService } from '@/modules/audit/audit.service';
 import { CurrentUser, RequirePlatformRole, WebOnly } from '@/common/decorators';
 import { PlatformRoleGuard } from '@/common/guards/platform-role.guard';
 import type { AuthenticatedUser } from '@/common/types';
-import { PlatformRole } from '../../../generated/prisma';
+import { AuditActor, PlatformRole } from '../../../generated/prisma';
 
 @ApiTags('Organizations')
 @Controller()
 @ApiBearerAuth()
 @WebOnly()
 export class OrganizationsController {
-  constructor(private readonly service: OrganizationsService) {}
+  constructor(
+    private readonly service: OrganizationsService,
+    private readonly usage: UsageService,
+    private readonly audit: AuditService,
+  ) {}
 
   @Get('organizations/mine')
   @ApiOperation({ summary: 'Datos de la organización del usuario autenticado' })
@@ -67,6 +73,32 @@ export class OrganizationsController {
     return this.service.changePlan(user.organizationId, dto.planSlug, user.id, {
       selfService: true,
     });
+  }
+
+  @Post('admin/organizations/:id/usage-credit')
+  @UseGuards(PlatformRoleGuard)
+  @RequirePlatformRole(PlatformRole.ADMIN)
+  @ApiOperation({
+    summary: 'Admin: acreditar comprobantes de regalo en el ciclo actual (incidentes de nuestro lado)',
+  })
+  async adminUsageCredit(
+    @Param('id') orgId: string,
+    @Body() dto: UsageCreditDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    await this.service.findById(orgId);
+    const snapshot = await this.usage.grantBonus(orgId, dto.comprobantes);
+    void this.audit.record({
+      actorType: AuditActor.USER,
+      actorUserId: user?.id ?? null,
+      organizationId: orgId,
+      action: 'usage.bonus_granted',
+      severity: 'info',
+      targetType: 'organization',
+      targetId: orgId,
+      metadata: { comprobantes: dto.comprobantes, reason: dto.reason, bonusTotal: snapshot.bonusCount },
+    });
+    return { bonusCount: snapshot.bonusCount, periodEnd: snapshot.periodEnd };
   }
 
   @Patch('admin/organizations/:id/plan')

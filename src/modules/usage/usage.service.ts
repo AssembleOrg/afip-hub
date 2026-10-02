@@ -23,6 +23,8 @@ export interface UsageSnapshot {
   billableCount: number;
   pdfCount: number;
   taCount: number;
+  /** Comprobantes de regalo del ciclo (se suman al cupo). */
+  bonusCount: number;
   periodStart: Date;
   periodEnd: Date;
 }
@@ -82,6 +84,14 @@ export class UsageService {
               lastUpdatedAt: new Date(),
             },
           });
+        } else if (
+          params.kind === UsageKind.BILLABLE &&
+          params.statusCode >= 500 &&
+          params.cost > 0
+        ) {
+          // Falla de nuestro lado (servidor o ARCA caída): compensamos con un
+          // comprobante de regalo, con tope para que no sea explotable.
+          await this.creditFailure(tx, params.organizationId, params.cost);
         } else if (params.kind === UsageKind.TA) {
           const counter = await this.getOrCreateCurrentCounter(
             tx,
@@ -121,6 +131,7 @@ export class UsageService {
       billableCount: counter.billableCount,
       pdfCount: counter.pdfCount,
       taCount: counter.taCount,
+      bonusCount: counter.bonusCount,
       periodStart: counter.periodStart,
       periodEnd: counter.periodEnd,
     };
@@ -165,6 +176,38 @@ export class UsageService {
     }
 
     return counter;
+  }
+
+  /**
+   * Acredita comprobantes de regalo en el ciclo actual (incidentes, acuerdos
+   * comerciales). Lo usa admin; las fallas 5xx se acreditan solas.
+   */
+  async grantBonus(organizationId: string, comprobantes: number): Promise<UsageSnapshot> {
+    const counter = await this.getOrCreateCurrentCounter(this.prisma, organizationId);
+    await this.prisma.usageCounter.update({
+      where: { id: counter.id },
+      data: { bonusCount: { increment: comprobantes }, lastUpdatedAt: new Date() },
+    });
+    return this.getCurrentSnapshot(organizationId);
+  }
+
+  private async creditFailure(
+    tx: { organization: any; usageCounter: any },
+    organizationId: string,
+    cost: number,
+  ): Promise<void> {
+    const org = await tx.organization.findUnique({
+      where: { id: organizationId },
+      select: { plan: { select: { requestsLimit: true } } },
+    });
+    const cap = Math.max(10, Math.floor((org?.plan?.requestsLimit ?? 0) * 0.1));
+    const counter = await this.getOrCreateCurrentCounter(tx, organizationId);
+    const credit = Math.min(cost, Math.max(0, cap - counter.bonusCount));
+    if (credit <= 0) return;
+    await tx.usageCounter.update({
+      where: { id: counter.id },
+      data: { bonusCount: { increment: credit }, lastUpdatedAt: new Date() },
+    });
   }
 
   /**

@@ -472,6 +472,9 @@ model UsageCounter {
   billableCount  Int          @default(0) @map("billable_count")
   pdfCount       Int          @default(0) @map("pdf_count")
   taCount        Int          @default(0) @map("ta_count")
+  // Comprobantes de regalo del ciclo: se suman al cupo. Se acreditan solos
+  // cuando una emisión falla por nuestro lado (5xx) o a mano desde admin.
+  bonusCount     Int @default(0) @map("bonus_count")
   lastUpdatedAt  DateTime     @default(now()) @map("last_updated_at")
 
   @@unique([organizationId, periodStart])

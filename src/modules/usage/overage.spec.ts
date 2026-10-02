@@ -29,3 +29,11 @@ describe('computeOverage', () => {
     expect(computeOverage(p, { billableCount: 103, pdfCount: 0 }).usd).toBe(0.01);
   });
 });
+
+describe('computeOverage con comprobantes de regalo', () => {
+  it('el regalo amplía el cupo antes de cobrar excedente', () => {
+    expect(
+      computeOverage(plan, { billableCount: 115, pdfCount: 0, bonusCount: 10 }).comprobantes,
+    ).toBe(5);
+  });
+});

@@ -105,7 +105,10 @@ export class DashboardService {
     const plan = org.plan;
     const limit = plan?.requestsLimit ?? 0;
     const used = usageSnap.billableCount;
-    const percentUsed = limit > 0 ? Math.round((used / limit) * 1000) / 10 : 0;
+    // El cupo efectivo incluye los comprobantes de regalo del ciclo.
+    const effectiveLimit = limit + usageSnap.bonusCount;
+    const percentUsed =
+      effectiveLimit > 0 ? Math.round((used / effectiveLimit) * 1000) / 10 : 0;
     const daysLeft = Math.max(
       0,
       Math.ceil((periodEnd.getTime() - now.getTime()) / DAY_MS),
@@ -152,6 +155,7 @@ export class DashboardService {
         taCount: usageSnap.taCount,
         limit,
         pdfLimit: plan?.pdfLimit ?? 0,
+        bonus: usageSnap.bonusCount,
         percentUsed,
         daysLeft,
         overage: {

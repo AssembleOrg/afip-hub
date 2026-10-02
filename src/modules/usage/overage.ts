@@ -13,10 +13,12 @@ export function computeOverage(
     overagePriceUsd: number;
     pdfOveragePriceUsd: number;
   },
-  usage: { billableCount: number; pdfCount: number },
+  usage: { billableCount: number; pdfCount: number; bonusCount?: number },
 ): CurrentOverage {
+  // Los comprobantes de regalo amplían el cupo del ciclo.
+  const cupo = plan.requestsLimit + (usage.bonusCount ?? 0);
   const comprobantes =
-    plan.overagePriceUsd > 0 ? Math.max(0, usage.billableCount - plan.requestsLimit) : 0;
+    plan.overagePriceUsd > 0 ? Math.max(0, usage.billableCount - cupo) : 0;
   const pdfs = plan.pdfOveragePriceUsd > 0 ? Math.max(0, usage.pdfCount - plan.pdfLimit) : 0;
   const usd = comprobantes * plan.overagePriceUsd + pdfs * plan.pdfOveragePriceUsd;
   return { comprobantes, pdfs, usd: Math.round(usd * 100) / 100 };

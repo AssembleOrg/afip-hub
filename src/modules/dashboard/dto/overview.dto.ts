@@ -16,6 +16,7 @@ export class OverviewUsageDto {
   @ApiProperty() taCount!: number;
   @ApiProperty({ description: 'Comprobantes incluidos en el plan' }) limit!: number;
   @ApiProperty({ description: 'PDFs incluidos en el plan' }) pdfLimit!: number;
+  @ApiProperty({ description: 'Comprobantes de regalo del ciclo (se suman al cupo)' }) bonus!: number;
   @ApiProperty({ type: OverviewOverageDto }) overage!: OverviewOverageDto;
   @ApiProperty({ description: '0-100 (puede exceder si está en grace)' })
   percentUsed!: number;
