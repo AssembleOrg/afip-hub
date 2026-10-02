@@ -14,6 +14,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 import * as xml2js from 'xml2js';
+import { afipFailure } from './afip-failure';
 import * as crypto from 'node:crypto';
 import { RedisService } from '@/infra/redis';
 import { resilientCall } from '@/infra/resilience';
@@ -413,9 +414,7 @@ export class AfipService implements OnModuleInit {
 
       this.logger.error(`Error al obtener ticket: ${error.message}`);
       this.logger.error(`Stack: ${error.stack}`);
-      throw new BadRequestException(
-        `Error al obtener ticket de AFIP: ${error.message}`,
-      );
+      throw afipFailure(error, `Error al obtener ticket de AFIP: ${error.message}`);
     }
   }
 
@@ -1513,9 +1512,7 @@ export class AfipService implements OnModuleInit {
         `Error general al consultar contribuyente: ${error.message}`,
       );
       this.logger.error(`Stack: ${error.stack}`);
-      throw new BadRequestException(
-        `Error al consultar contribuyente: ${error.message}`,
-      );
+      throw afipFailure(error, `Error al consultar contribuyente: ${error.message}`);
     }
   }
 
@@ -2279,9 +2276,7 @@ export class AfipService implements OnModuleInit {
     } catch (error: any) {
       this.logger.error(`Error general al crear factura: ${error.message}`);
       this.logger.error(`Stack: ${error.stack}`);
-      throw new BadRequestException(
-        `Error al crear factura electrónica: ${error.message}`,
-      );
+      throw afipFailure(error, `Error al crear factura electrónica: ${error.message}`);
     }
   }
 

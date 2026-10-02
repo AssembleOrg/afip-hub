@@ -13,6 +13,14 @@ const MIN_ERRORS = 10;
 const MIN_ERROR_RATE = 0.2;
 /** No repetimos el aviso de un incidente abierto más de una vez por hora. */
 const REALERT_MS = 60 * 60 * 1000;
+/** Clave en admin_settings donde persistimos el estado entre reinicios. */
+const STATE_KEY = 'monitoring.incident_state';
+
+interface IncidentState {
+  openSince: string | null;
+  lastAlertAt: number;
+  peakErrors: number;
+}
 
 export interface IncidentSnapshot {
   attempts: number;
@@ -27,15 +35,12 @@ export interface IncidentSnapshot {
  * las llamadas de los clientes y avisa por email a los platform admins: una
  * vez al abrirse el incidente, recordatorio cada hora y aviso al resolverse.
  *
- * El estado vive en memoria (una sola instancia). Si el proceso reinicia en
- * medio de un incidente, como mucho llega un aviso de más.
+ * El estado se persiste en admin_settings para que un reinicio en medio de un
+ * incidente no repita el aviso ni pierda el "resuelto".
  */
 @Injectable()
 export class IncidentAlertsService {
   private readonly logger = new Logger(IncidentAlertsService.name);
-  private openSince: Date | null = null;
-  private lastAlertAt = 0;
-  private peakErrors = 0;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -92,32 +97,58 @@ export class IncidentAlertsService {
 
   async check(now = new Date()): Promise<void> {
     const s = await this.snapshot(now);
-    const incident = this.isIncident(s);
+    const state = await this.loadState();
 
-    if (incident) {
-      this.peakErrors = Math.max(this.peakErrors, s.errors);
-      const isNew = !this.openSince;
-      if (isNew) this.openSince = now;
-      if (isNew || now.getTime() - this.lastAlertAt >= REALERT_MS) {
-        this.lastAlertAt = now.getTime();
+    if (this.isIncident(s)) {
+      state.peakErrors = Math.max(state.peakErrors, s.errors);
+      const isNew = !state.openSince;
+      if (isNew) state.openSince = now.toISOString();
+      if (isNew || now.getTime() - state.lastAlertAt >= REALERT_MS) {
+        state.lastAlertAt = now.getTime();
         this.logger.warn(
           `Incidente: ${s.errors} fallas 5xx de ${s.attempts} intentos en ${WINDOW_MIN} min`,
         );
-        await this.notify('open', s, now);
+        await this.notify('open', s, now, state);
       }
+      await this.saveState(state);
       return;
     }
 
-    if (this.openSince) {
+    if (state.openSince) {
       this.logger.log('Incidente resuelto: fallas 5xx bajo el umbral');
-      await this.notify('resolved', s, now);
-      this.openSince = null;
-      this.lastAlertAt = 0;
-      this.peakErrors = 0;
+      await this.notify('resolved', s, now, state);
+      await this.saveState({ openSince: null, lastAlertAt: 0, peakErrors: 0 });
     }
   }
 
-  private async notify(state: 'open' | 'resolved', s: IncidentSnapshot, now: Date) {
+  private async loadState(): Promise<IncidentState> {
+    const row = await this.prisma.adminSetting.findUnique({ where: { key: STATE_KEY } });
+    const v = (row?.value ?? {}) as Partial<IncidentState>;
+    return {
+      openSince: typeof v.openSince === 'string' ? v.openSince : null,
+      lastAlertAt: typeof v.lastAlertAt === 'number' ? v.lastAlertAt : 0,
+      peakErrors: typeof v.peakErrors === 'number' ? v.peakErrors : 0,
+    };
+  }
+
+  private async saveState(state: IncidentState): Promise<void> {
+    await this.prisma.adminSetting.upsert({
+      where: { key: STATE_KEY },
+      create: {
+        key: STATE_KEY,
+        value: state as any,
+        description: 'Estado del monitoreo de fallas 5xx (lo maneja el sistema)',
+      },
+      update: { value: state as any },
+    });
+  }
+
+  private async notify(
+    kind: 'open' | 'resolved',
+    s: IncidentSnapshot,
+    now: Date,
+    state: IncidentState,
+  ) {
     const admins = await this.prisma.user.findMany({
       where: { platformRole: PlatformRole.ADMIN, deletedAt: null },
       select: { email: true },
@@ -128,7 +159,7 @@ export class IncidentAlertsService {
     }
 
     const productName = this.config.get<string>('branding.productName') ?? 'AFIP Hub';
-    const open = state === 'open';
+    const open = kind === 'open';
     const subject = open
       ? `⚠️ ${productName}: ${s.errors} fallas en ${WINDOW_MIN} min (${Math.round(s.errorRate * 100)}%)`
       : `✅ ${productName}: se normalizaron las fallas`;
@@ -148,8 +179,8 @@ export class IncidentAlertsService {
             errors: s.errors,
             attempts: s.attempts,
             errorRatePct: Math.round(s.errorRate * 100),
-            peakErrors: this.peakErrors,
-            since: this.openSince ? formatLocal(this.openSince, 'datetime') : null,
+            peakErrors: state.peakErrors,
+            since: state.openSince ? formatLocal(new Date(state.openSince), 'datetime') : null,
             checkedAt: formatLocal(now, 'datetime'),
             byEndpoint: s.byEndpoint,
             byOrg: s.byOrg,
