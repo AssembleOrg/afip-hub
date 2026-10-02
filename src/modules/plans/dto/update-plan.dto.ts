@@ -58,6 +58,37 @@ export class UpdatePlanDto {
   @Max(2)
   graceFactor?: number;
 
+  @ApiPropertyOptional({ description: 'PDFs incluidos por mes' })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  pdfLimit?: number;
+
+  @ApiPropertyOptional({ description: 'Consultas a ARCA por minuto (no consumen cupo)' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  consultaRateLimitPerMin?: number;
+
+  @ApiPropertyOptional({ description: 'USD por comprobante por encima del cupo (0 = bloquea al llegar al límite)' })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 4 })
+  @Min(0)
+  overagePriceUsd?: number;
+
+  @ApiPropertyOptional({ description: 'USD por PDF por encima del cupo (0 = bloquea al llegar al límite)' })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 4 })
+  @Min(0)
+  pdfOveragePriceUsd?: number;
+
+  @ApiPropertyOptional({ description: 'Techo de seguridad: cupo × factor (3 = hasta el triple)' })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(1)
+  @Max(20)
+  overageCapFactor?: number;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsObject()

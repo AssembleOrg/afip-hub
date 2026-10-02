@@ -10,6 +10,7 @@ import { AuditService } from '@/modules/audit/audit.service';
 import { CreateApiKeyDto } from './dto';
 import { ResolvedApiKey, ResolvedOrganization } from '@/common/types';
 import { AuditActor, Prisma } from '../../../generated/prisma';
+import type { Organization, Plan } from '../../../generated/prisma';
 
 const KEY_BYTES = 32; // 256 bits → base64url ≈ 43 chars
 const KEY_PREFIX_CHARS = 12;
@@ -188,24 +189,27 @@ export class ApiKeysService {
         prefix: record.prefix,
         organizationId: org.id,
       },
-      org: {
-        id: org.id,
-        slug: org.slug,
-        name: org.name,
-        planId: org.planId,
-        planSlug: org.plan.slug,
-        requestsLimit: org.plan.requestsLimit,
-        pdfLimit: org.plan.pdfLimit,
-        graceFactor: Number(org.plan.graceFactor),
-        pdfRateLimitPerMin: org.plan.pdfRateLimitPerMin,
-        taRateLimitPerMin: org.plan.taRateLimitPerMin,
-        cuitLimit: org.plan.cuitLimit,
-        subscriptionStatus: org.subscriptionStatus,
-        currentPeriodStart: org.currentPeriodStart,
-        currentPeriodEnd: org.currentPeriodEnd,
-        suspendedAt: org.suspendedAt,
-      },
+      org: toResolvedOrganization(org),
     };
+  }
+
+  /**
+   * Resuelve la organización de un usuario logueado (JWT) con el mismo shape
+   * que el path de API key, para que QuotaGuard/CuitLimitGuard funcionen
+   * también en endpoints billables usados desde el panel.
+   */
+  async resolveOrganizationById(orgId: string): Promise<ResolvedOrganization | null> {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      include: { plan: true },
+    });
+    if (!org || org.deletedAt) return null;
+    if (org.suspendedAt) {
+      throw new ForbiddenException(
+        `Organización suspendida: ${org.suspendedReason ?? 'contactar soporte'}`,
+      );
+    }
+    return toResolvedOrganization(org);
   }
 
   private async touchLastUsed(apiKeyId: string, ip?: string) {
@@ -237,4 +241,30 @@ export class ApiKeysService {
   private hashKey(raw: string): string {
     return crypto.createHash('sha256').update(raw).digest('hex');
   }
+}
+
+function toResolvedOrganization(
+  org: Organization & { plan: Plan },
+): ResolvedOrganization {
+  return {
+    id: org.id,
+    slug: org.slug,
+    name: org.name,
+    planId: org.planId,
+    planSlug: org.plan.slug,
+    requestsLimit: org.plan.requestsLimit,
+    pdfLimit: org.plan.pdfLimit,
+    graceFactor: Number(org.plan.graceFactor),
+    pdfRateLimitPerMin: org.plan.pdfRateLimitPerMin,
+    taRateLimitPerMin: org.plan.taRateLimitPerMin,
+    consultaRateLimitPerMin: org.plan.consultaRateLimitPerMin,
+    overagePriceUsd: Number(org.plan.overagePriceUsd),
+    pdfOveragePriceUsd: Number(org.plan.pdfOveragePriceUsd),
+    overageCapFactor: Number(org.plan.overageCapFactor),
+    cuitLimit: org.plan.cuitLimit,
+    subscriptionStatus: org.subscriptionStatus,
+    currentPeriodStart: org.currentPeriodStart,
+    currentPeriodEnd: org.currentPeriodEnd,
+    suspendedAt: org.suspendedAt,
+  };
 }

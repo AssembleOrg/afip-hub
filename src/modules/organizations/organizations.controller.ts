@@ -64,7 +64,23 @@ export class OrganizationsController {
     if (!user?.organizationId || user.orgRole !== 'OWNER') {
       throw new ForbiddenException('Solo el OWNER puede cambiar el plan');
     }
-    return this.service.changePlan(user.organizationId, dto.planSlug, user.id);
+    return this.service.changePlan(user.organizationId, dto.planSlug, user.id, {
+      selfService: true,
+    });
+  }
+
+  @Patch('admin/organizations/:id/plan')
+  @UseGuards(PlatformRoleGuard)
+  @RequirePlatformRole(PlatformRole.ADMIN)
+  @ApiOperation({
+    summary: 'Admin: asignar un plan a una organización sin pasar por MercadoPago (acuerdos a medida)',
+  })
+  adminChangePlan(
+    @Param('id') orgId: string,
+    @Body() dto: ChangePlanDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.changePlan(orgId, dto.planSlug, user?.id);
   }
 
   @Get('admin/organizations')

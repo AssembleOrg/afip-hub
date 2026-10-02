@@ -127,9 +127,23 @@ export class OrganizationsService {
    * webhook de MercadoPago cuando confirma el upgrade. El ajuste de período
    * y precios en ARS lo maneja BillingModule en Fase 2.
    */
-  async changePlan(orgId: string, planSlug: string, actorUserId?: string) {
+  async changePlan(
+    orgId: string,
+    planSlug: string,
+    actorUserId?: string,
+    opts: { selfService?: boolean } = {},
+  ) {
     const org = await this.findById(orgId);
     const newPlan = await this.plansService.getBySlug(planSlug);
+
+    // El dueño solo puede pasarse solo a un plan gratuito; los pagos se
+    // contratan por MercadoPago (POST /billing/subscribe). Si no, cualquiera
+    // podía subir a Enterprise sin pagar.
+    if (opts.selfService && Number(newPlan.priceUsd) > 0) {
+      throw new ForbiddenException(
+        'Para pasarte a un plan pago, contratalo desde Plan y facturación.',
+      );
+    }
 
     if (org.planId === newPlan.id) {
       throw new BadRequestException('La organización ya está en ese plan');

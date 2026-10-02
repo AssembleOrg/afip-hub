@@ -1,4 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { computeOverage, CurrentOverage } from './overage';
+export { computeOverage } from './overage';
+export type { CurrentOverage } from './overage';
 import { PrismaService } from '@/database/prisma.service';
 import { addMonths } from '@/common/utils/date.util';
 import { UsageKind } from '../../../generated/prisma';
@@ -114,7 +117,8 @@ export class UsageService {
       organizationId,
     );
     return {
-      billableCount: counter.billableCount + counter.pdfCount,
+      // Comprobantes emitidos; los PDFs tienen su propio cupo.
+      billableCount: counter.billableCount,
       pdfCount: counter.pdfCount,
       taCount: counter.taCount,
       periodStart: counter.periodStart,
@@ -161,6 +165,29 @@ export class UsageService {
     }
 
     return counter;
+  }
+
+  /**
+   * Excedente del período actual: comprobantes y PDFs por encima del cupo del
+   * plan, valorizados al precio de excedente. Es lo que se suma al próximo
+   * débito de MercadoPago.
+   */
+  async getCurrentOverage(organizationId: string): Promise<CurrentOverage> {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      include: { plan: true },
+    });
+    if (!org) throw new Error(`Organization ${organizationId} no existe`);
+    const snapshot = await this.getCurrentSnapshot(organizationId);
+    return computeOverage(
+      {
+        requestsLimit: org.plan.requestsLimit,
+        pdfLimit: org.plan.pdfLimit,
+        overagePriceUsd: Number(org.plan.overagePriceUsd),
+        pdfOveragePriceUsd: Number(org.plan.pdfOveragePriceUsd),
+      },
+      snapshot,
+    );
   }
 
   /**

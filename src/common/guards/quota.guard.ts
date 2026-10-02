@@ -8,17 +8,22 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { BILLABLE_KEY, BillableMetadata } from '../decorators/billable.decorator';
-import { SaasRequest } from '../types/request-context';
-import { UsageKind } from '../../../generated/prisma';
+import { ResolvedOrganization, SaasRequest } from '../types/request-context';
+import { SubscriptionStatus, UsageKind } from '../../../generated/prisma';
 import { UsageService } from '@/modules/usage/usage.service';
 import { RateLimiterService } from '@/modules/usage/rate-limiter.service';
+import { ApiKeysService } from '@/modules/api-keys/api-keys.service';
 
 /**
- * Enforcement de la quota del plan + rate-limit específico por `kind`.
+ * Enforcement del cupo del plan + rate-limit específico por `kind`.
  *
- *  - `BILLABLE` → chequea `requestsLimit × graceFactor` del plan.
- *    Si está en el último 2% (gracia), marca warning en el request.
- *  - `PDF` → igual que BILLABLE **y** rate-limit `pdfRateLimitPerMin`.
+ *  - `BILLABLE` (emite comprobante) → cupo `requestsLimit` (comprobantes/mes).
+ *    Si el plan cobra excedente y la suscripción está activa, se sigue
+ *    emitiendo por encima del cupo (se cobra en el próximo débito) hasta el
+ *    techo `requestsLimit × overageCapFactor`. Sin excedente (Free), corta en
+ *    `requestsLimit × graceFactor`.
+ *  - `PDF` → mismo esquema contra `pdfLimit` + rate-limit `pdfRateLimitPerMin`.
+ *  - `CONSULTA` → no consume cupo; rate-limit `consultaRateLimitPerMin`.
  *  - `TA` → rate-limit `taRateLimitPerMin`, NO cuenta para quota.
  *  - `NON_BILLABLE` o sin decorador → pasa.
  */
@@ -28,6 +33,7 @@ export class QuotaGuard implements CanActivate {
     private readonly reflector: Reflector,
     private readonly usageService: UsageService,
     private readonly rateLimiter: RateLimiterService,
+    private readonly apiKeys: ApiKeysService,
   ) {}
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
@@ -38,69 +44,64 @@ export class QuotaGuard implements CanActivate {
     if (!billable || billable.kind === UsageKind.NON_BILLABLE) return true;
 
     const req = ctx.switchToHttp().getRequest<SaasRequest>();
+    // En el path de API key la org ya viene resuelta; desde el panel (JWT) la
+    // resolvemos acá para que el endpoint cuente y respete el cupo igual.
+    if (!req.organization && req.user?.organizationId) {
+      req.organization =
+        (await this.apiKeys.resolveOrganizationById(req.user.organizationId)) ?? undefined;
+    }
     const org = req.organization;
     if (!org) {
-      // Si llegamos acá sin org resuelta, algo está mal cableado aguas arriba.
       throw new UnauthorizedException(
         'Endpoint marcado como billable pero el request no tiene organización resuelta (falta @ApiKeyAuth?)',
       );
     }
 
-    // Rate-limit específico (antes del quota check, más barato):
-    if (billable.kind === UsageKind.PDF) {
-      await this.enforceRateLimit(`pdf:${org.id}`, org.pdfRateLimitPerMin);
-    } else if (billable.kind === UsageKind.TA) {
+    if (billable.kind === UsageKind.TA) {
       const keyId = req.apiKey?.id ?? org.id;
       await this.enforceRateLimit(`ta:${keyId}`, org.taRateLimitPerMin);
-      return true; // TA no consume quota
+      return true;
+    }
+    if (billable.kind === UsageKind.CONSULTA) {
+      await this.enforceRateLimit(`consulta:${org.id}`, org.consultaRateLimitPerMin);
+      return true;
+    }
+    if (billable.kind === UsageKind.PDF) {
+      await this.enforceRateLimit(`pdf:${org.id}`, org.pdfRateLimitPerMin);
     }
 
-    // Quota (BILLABLE y PDF):
     const snapshot = await this.usageService.getCurrentSnapshot(org.id);
-    const usedAfter = snapshot.billableCount + billable.cost;
-    const effectiveLimit = Math.floor(org.requestsLimit * org.graceFactor);
+    const isPdf = billable.kind === UsageKind.PDF;
+    const used = isPdf ? snapshot.pdfCount : snapshot.billableCount;
+    const limit = isPdf ? org.pdfLimit : org.requestsLimit;
+    const overagePrice = isPdf ? org.pdfOveragePriceUsd : org.overagePriceUsd;
+    const usedAfter = used + billable.cost;
+    const allowsOverage = canChargeOverage(org, overagePrice);
+    const hardLimit = allowsOverage
+      ? Math.floor(limit * org.overageCapFactor)
+      : Math.floor(limit * (isPdf ? 1 : org.graceFactor));
 
-    if (usedAfter > effectiveLimit) {
+    if (usedAfter > hardLimit) {
+      const unit = isPdf ? 'PDFs' : 'comprobantes';
       throw new HttpException(
         {
-          error: 'quota_exceeded',
-          message: `Superaste el límite de tu plan "${org.planSlug}" (${org.requestsLimit} requests${
-            org.graceFactor > 1
-              ? ` + ${Math.round((org.graceFactor - 1) * 100)}% de gracia`
-              : ''
-          }). Subí de plan o esperá al próximo ciclo (${snapshot.periodEnd.toISOString()}).`,
+          error: isPdf ? 'pdf_quota_exceeded' : 'quota_exceeded',
+          message: allowsOverage
+            ? `Llegaste al techo de excedente de tu plan "${org.planSlug}" (${hardLimit} ${unit} en el ciclo). Subí de plan para seguir emitiendo antes del ${snapshot.periodEnd.toISOString()}.`
+            : `Usaste los ${limit} ${unit} de tu plan "${org.planSlug}". Subí de plan para seguir emitiendo o esperá al próximo ciclo (${snapshot.periodEnd.toISOString()}).`,
           plan: org.planSlug,
-          limit: org.requestsLimit,
-          graceLimit: effectiveLimit,
-          used: snapshot.billableCount,
+          limit,
+          hardLimit,
+          used,
+          overageAllowed: allowsOverage,
           periodEnd: snapshot.periodEnd,
         },
         HttpStatus.TOO_MANY_REQUESTS,
       );
     }
 
-    // Quota específica de PDFs: límite adicional independiente de requestsLimit.
-    if (billable.kind === UsageKind.PDF) {
-      const pdfAfter = snapshot.pdfCount + billable.cost;
-      if (pdfAfter > org.pdfLimit) {
-        throw new HttpException(
-          {
-            error: 'pdf_quota_exceeded',
-            message: `Superaste el límite de PDFs de tu plan "${org.planSlug}" (${org.pdfLimit}/mes). Contratá el addon de PDFs extras o subí de plan.`,
-            plan: org.planSlug,
-            pdfLimit: org.pdfLimit,
-            pdfUsed: snapshot.pdfCount,
-            periodEnd: snapshot.periodEnd,
-          },
-          HttpStatus.TOO_MANY_REQUESTS,
-        );
-      }
-    }
-
-    if (usedAfter > org.requestsLimit) {
-      // Entró en zona de gracia: marcamos el request para que el interceptor
-      // agregue el header/aviso en la respuesta.
-      req._quotaWarning = 'grace';
+    if (usedAfter > limit) {
+      req._quotaWarning = allowsOverage ? 'overage' : 'grace';
     }
 
     return true;
@@ -120,4 +121,12 @@ export class QuotaGuard implements CanActivate {
       );
     }
   }
+}
+
+/**
+ * El excedente solo se habilita si el plan lo cobra y hay una suscripción
+ * activa en MercadoPago contra la cual sumarlo al próximo débito.
+ */
+export function canChargeOverage(org: ResolvedOrganization, overagePriceUsd: number): boolean {
+  return overagePriceUsd > 0 && org.subscriptionStatus === SubscriptionStatus.ACTIVE;
 }

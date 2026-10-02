@@ -57,11 +57,17 @@ export class UsageCounterInterceptor implements NestInterceptor {
     const startedAt = Date.now();
 
     return next.handle().pipe(
-      tap(() => {
-        if (req._quotaWarning === 'grace') {
-          res.setHeader(WARNING_HEADER, 'grace');
+      tap((body) => {
+        if (req._quotaWarning) {
+          res.setHeader(WARNING_HEADER, req._quotaWarning);
         }
-        this.record(req, billable, res.statusCode ?? 200, Date.now() - startedAt);
+        // Un comprobante rechazado por ARCA (resultado "R") vuelve con 200 pero
+        // no se emitió: se registra el evento sin consumir cupo.
+        const effective =
+          billable.kind === UsageKind.BILLABLE && isRejectedByArca(body)
+            ? { ...billable, cost: 0 }
+            : billable;
+        this.record(req, effective, res.statusCode ?? 200, Date.now() - startedAt);
       }),
       catchError((err) => {
         const status = err?.status ?? err?.getStatus?.() ?? 500;
@@ -133,7 +139,7 @@ export class UsageCounterInterceptor implements NestInterceptor {
     if (!org || !org.plan.requestsLimit) return;
 
     const snapshot = await this.usageService.getCurrentSnapshot(orgId);
-    const used = snapshot.billableCount; // billableCount incluye PDFs (suma arriba)
+    const used = snapshot.billableCount; // comprobantes emitidos en el ciclo
     const limit = org.plan.requestsLimit;
     const graceLimit = Math.floor(limit * Number(org.plan.graceFactor));
 
@@ -168,4 +174,10 @@ export class UsageCounterInterceptor implements NestInterceptor {
       this.events.emit(EVENTS.QUOTA_WARNING_80, payload);
     }
   }
+}
+
+function isRejectedByArca(body: unknown): boolean {
+  if (!body || typeof body !== 'object') return false;
+  const b = body as { resultado?: unknown; data?: { resultado?: unknown } };
+  return b.data?.resultado === 'R' || b.resultado === 'R';
 }

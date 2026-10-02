@@ -139,7 +139,7 @@ export class NotificationsService {
       dedupeKey: `quota_warning_80:${params.orgId}:${params.periodStart.toISOString()}`,
       template: 'quota-warning',
       subject: `Usaste el ${pct}% de tu plan — ${params.planName}`,
-      preheader: `Todavía te quedan ${params.limit - params.used} requests este ciclo`,
+      preheader: `Todavía te quedan ${params.limit - params.used} comprobantes este ciclo`,
       data: {
         userName: params.orgName,
         orgName: params.orgName,

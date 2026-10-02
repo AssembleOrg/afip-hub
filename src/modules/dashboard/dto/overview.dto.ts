@@ -1,10 +1,22 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
+export class OverviewOverageDto {
+  @ApiProperty({ description: 'Comprobantes por encima del cupo' }) comprobantes!: number;
+  @ApiProperty({ description: 'PDFs por encima del cupo' }) pdfs!: number;
+  @ApiProperty({ description: 'Excedente acumulado del ciclo en USD' }) usd!: number;
+  @ApiProperty() arsEstimate!: number;
+  @ApiProperty({ description: 'USD por comprobante extra (0 = sin excedente)' }) priceUsd!: number;
+  @ApiProperty({ description: 'USD por PDF extra (0 = sin excedente)' }) pdfPriceUsd!: number;
+}
+
 export class OverviewUsageDto {
-  @ApiProperty() billableCount!: number;
+  @ApiProperty({ description: 'Comprobantes emitidos (aprobados) en el ciclo' })
+  billableCount!: number;
   @ApiProperty() pdfCount!: number;
   @ApiProperty() taCount!: number;
-  @ApiProperty() limit!: number;
+  @ApiProperty({ description: 'Comprobantes incluidos en el plan' }) limit!: number;
+  @ApiProperty({ description: 'PDFs incluidos en el plan' }) pdfLimit!: number;
+  @ApiProperty({ type: OverviewOverageDto }) overage!: OverviewOverageDto;
   @ApiProperty({ description: '0-100 (puede exceder si está en grace)' })
   percentUsed!: number;
   @ApiProperty({ description: 'Días restantes del ciclo' }) daysLeft!: number;

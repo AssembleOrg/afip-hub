@@ -4,13 +4,13 @@
 
 <h1 style="margin:0 0 16px;color:#0F172A;font-size:28px;font-weight:700;letter-spacing:-0.02em;line-height:1.2;">Llegaste al 100% de tu plan</h1>
 <p style="margin:0 0 24px;color:#475569;font-size:16px;line-height:1.6;">
-  {{userName}}, <strong style="color:#0F172A;">{{orgName}}</strong> agotó los <strong>{{limit}} requests</strong> del plan <strong>{{planName}}</strong>.
+  {{userName}}, <strong style="color:#0F172A;">{{orgName}}</strong> agotó los <strong>{{limit}} comprobantes</strong> del plan <strong>{{planName}}</strong>.
 </p>
 
 <div style="padding:20px;background:#FEF3C7;border-radius:12px;margin:24px 0;">
-  <h3 style="margin:0 0 8px;color:#78350F;font-size:15px;font-weight:700;">Tenés 2% de gracia activa</h3>
+  <h3 style="margin:0 0 8px;color:#78350F;font-size:15px;font-weight:700;">¿Qué pasa ahora?</h3>
   <p style="margin:0;color:#78350F;font-size:14px;line-height:1.6;">
-    Podés seguir haciendo hasta <strong>{{graceLimit}} requests</strong> (Math.floor({{limit}} × 1.02)). Cada response llega con el header <code style="background:#FDE68A;padding:2px 6px;border-radius:4px;font-family:monospace;font-size:12px;">X-Usage-Warning: grace</code>. Cuando termine la gracia, la API responderá <strong>429 Too Many Requests</strong> hasta el reinicio del ciclo.
+    Si tu plan incluye excedente, seguís emitiendo con normalidad y cada comprobante extra se suma al próximo cobro (las respuestas llegan con el header <code style="background:#FDE68A;padding:2px 6px;border-radius:4px;font-family:monospace;font-size:12px;">X-Usage-Warning: overage</code>). Si no lo incluye, podés emitir hasta <strong>{{graceLimit}}</strong> comprobantes y después la API responde <strong>429</strong> hasta el reinicio del ciclo o hasta que subas de plan.
   </p>
 </div>
 
@@ -21,7 +21,7 @@
       <td align="right" style="padding:6px 0;color:#0F172A;font-size:14px;font-weight:600;">{{periodEnd}}</td>
     </tr>
     <tr>
-      <td style="padding:6px 0;color:#64748B;font-size:14px;">Requests usados:</td>
+      <td style="padding:6px 0;color:#64748B;font-size:14px;">Comprobantes emitidos:</td>
       <td align="right" style="padding:6px 0;color:#0F172A;font-size:14px;font-weight:600;">{{used}} / {{limit}}</td>
     </tr>
   </table>

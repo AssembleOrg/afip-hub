@@ -1,6 +1,6 @@
 import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '@/database/prisma.service';
-import { UsageService } from '@/modules/usage/usage.service';
+import { UsageService, computeOverage } from '@/modules/usage/usage.service';
 import { ExchangeRateService } from '@/modules/exchange-rate/exchange-rate.service';
 import {
   SubscriptionStatus,
@@ -124,6 +124,15 @@ export class DashboardService {
     const priceUsd = plan ? Number(plan.priceUsd) : 0;
     const blueRate = Number(rate.sell);
     const priceArsEstimate = Math.round(priceUsd * blueRate);
+    const overage = computeOverage(
+      {
+        requestsLimit: plan?.requestsLimit ?? 0,
+        pdfLimit: plan?.pdfLimit ?? 0,
+        overagePriceUsd: Number(plan?.overagePriceUsd ?? 0),
+        pdfOveragePriceUsd: Number(plan?.pdfOveragePriceUsd ?? 0),
+      },
+      usageSnap,
+    );
 
     const requestsPerDay = perDayRaw.map((row) => ({
       date: row.day.toISOString().slice(0, 10),
@@ -142,8 +151,17 @@ export class DashboardService {
         pdfCount: usageSnap.pdfCount,
         taCount: usageSnap.taCount,
         limit,
+        pdfLimit: plan?.pdfLimit ?? 0,
         percentUsed,
         daysLeft,
+        overage: {
+          comprobantes: overage.comprobantes,
+          pdfs: overage.pdfs,
+          usd: overage.usd,
+          arsEstimate: Math.round(overage.usd * blueRate),
+          priceUsd: Number(plan?.overagePriceUsd ?? 0),
+          pdfPriceUsd: Number(plan?.pdfOveragePriceUsd ?? 0),
+        },
       },
       invoices: {
         totalThisPeriod: thisCount,

@@ -49,6 +49,7 @@ enum UsageKind {
   PDF // generación de PDF: cuenta como request + aplica rate-limit propio
   TA // obtención de TA (WSAA): NO cuenta, pero tiene rate-limit anti-abuso
   NON_BILLABLE // health/status/otros: no cuenta y no limita
+  CONSULTA // consultas a ARCA (padrón, último autorizado, VE, WSCDC…): NO cuenta, rate-limit propio
 }
 
 enum PaymentStatus {
@@ -189,6 +190,13 @@ model Plan {
   cuitLimit          Int         @default(2) @map("cuit_limit")
   pdfRateLimitPerMin Int         @default(60) @map("pdf_rate_limit_per_min")
   taRateLimitPerMin  Int         @default(10) @map("ta_rate_limit_per_min")
+  consultaRateLimitPerMin Int     @default(120) @map("consulta_rate_limit_per_min")
+  // Excedente: precio por comprobante / PDF por encima del cupo. 0 = sin excedente
+  // (se bloquea al llegar al límite, como en Free). overageCapFactor es el techo
+  // de seguridad: nunca se emite más de requestsLimit × overageCapFactor.
+  overagePriceUsd    Decimal     @default(0) @map("overage_price_usd") @db.Decimal(10, 4)
+  pdfOveragePriceUsd Decimal     @default(0) @map("pdf_overage_price_usd") @db.Decimal(10, 4)
+  overageCapFactor   Decimal     @default(3) @map("overage_cap_factor") @db.Decimal(5, 2)
   graceFactor        Decimal     @default(1.000) @map("grace_factor") @db.Decimal(4, 3) // 1.02 = 2% grace
   features           Json        @default("{}")
   isActive           Boolean     @default(true) @map("is_active")
@@ -239,6 +247,9 @@ model Payment {
   amountArs      Decimal       @map("amount_ars") @db.Decimal(14, 2)
   amountUsd      Decimal       @map("amount_usd") @db.Decimal(10, 2)
   exchangeRate   Decimal       @map("exchange_rate") @db.Decimal(12, 4)
+  overageUsd          Decimal  @default(0) @map("overage_usd") @db.Decimal(10, 2)
+  overageComprobantes Int      @default(0) @map("overage_comprobantes")
+  overagePdfs         Int      @default(0) @map("overage_pdfs")
   status         PaymentStatus
   periodStart    DateTime      @map("period_start")
   periodEnd      DateTime      @map("period_end")

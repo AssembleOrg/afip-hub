@@ -78,6 +78,7 @@ import {
   ApiKeyAuth,
   Auditory,
   Billable,
+  ConsultaBillable,
   CertificateResolverInterceptor,
   Idempotent,
   PdfBillable,
@@ -226,7 +227,7 @@ Nota: AFIP WSFE no persiste el detalle de ítems; se autoriza por importes agreg
   }
 
   @Post('ultimo-autorizado')
-  @Billable()
+  @ConsultaBillable()
   @Auditory('Consultar último comprobante autorizado')
   @ApiOperation({
     summary:
@@ -305,7 +306,7 @@ Nota: AFIP WSFE no persiste el detalle de ítems; se autoriza por importes agreg
   }
 
   @Post('consultar-contribuyente')
-  @Billable()
+  @ConsultaBillable()
   @Auditory('Consultar datos de contribuyente')
   @ApiOperation({
     summary: 'Consultar datos de un contribuyente en AFIP',
@@ -329,7 +330,7 @@ Nota: AFIP WSFE no persiste el detalle de ítems; se autoriza por importes agreg
   }
 
   @Post('tipos-comprobante')
-  @Billable()
+  @ConsultaBillable()
   @Auditory('Consultar tipos de comprobante')
   @ApiOperation({
     summary: 'Obtener tipos de comprobante habilitados para el emisor',
@@ -359,7 +360,7 @@ Nota: AFIP WSFE no persiste el detalle de ítems; se autoriza por importes agreg
   }
 
   @Post('puntos-venta')
-  @Billable()
+  @ConsultaBillable()
   @Auditory('Consultar puntos de venta')
   @ApiOperation({
     summary: 'Obtener puntos de venta habilitados para el emisor',
@@ -386,7 +387,7 @@ Nota: AFIP WSFE no persiste el detalle de ítems; se autoriza por importes agreg
   }
 
   @Post('condiciones-iva')
-  @Billable()
+  @ConsultaBillable()
   @Auditory('Consultar condiciones IVA receptor')
   @ApiOperation({
     summary: 'Obtener condiciones IVA válidas para el receptor',
@@ -583,7 +584,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   // ============================================
 
   @Post('ve/comunicaciones')
-  @Billable()
+  @ConsultaBillable()
   @Auditory('Consultar comunicaciones Ventanilla Electrónica')
   @ApiOperation({
     summary: 'Consultar comunicaciones de AFIP',
@@ -617,7 +618,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   }
 
   @Post('ve/comunicacion')
-  @Billable()
+  @ConsultaBillable()
   @Auditory('Leer comunicación Ventanilla Electrónica')
   @ApiOperation({
     summary: 'Leer una comunicación específica',
@@ -651,7 +652,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   }
 
   @Post('ve/sistemas-publicadores')
-  @Billable()
+  @ConsultaBillable()
   @Auditory('Consultar sistemas publicadores VE')
   @ApiOperation({
     summary: 'Consultar sistemas publicadores',
@@ -682,7 +683,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   }
 
   @Post('ve/estados')
-  @Billable()
+  @ConsultaBillable()
   @Auditory('Consultar estados de comunicación VE')
   @ApiOperation({
     summary: 'Consultar estados de comunicación',
@@ -716,7 +717,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   // ============================================
 
   @Post('wscdc/constatar')
-  @Billable()
+  @ConsultaBillable()
   @Auditory('Constatar comprobante WSCDC')
   @ApiOperation({
     summary: 'Constatar/verificar un comprobante',
@@ -751,7 +752,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   }
 
   @Post('wscdc/constatar-completo')
-  @Billable()
+  @ConsultaBillable()
   @Auditory('Constatar comprobante WSCDC completo')
   @ApiOperation({
     summary: 'Constatar comprobante (request completo con CAE + importe + receptor)',
@@ -797,7 +798,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   }
 
   @Post('wscdc/modalidades')
-  @Billable()
+  @ConsultaBillable()
   @Auditory('Consultar modalidades de comprobante WSCDC')
   @ApiOperation({
     summary: 'Consultar modalidades de autorización',
@@ -827,7 +828,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   }
 
   @Post('wscdc/tipos-comprobante')
-  @Billable()
+  @ConsultaBillable()
   @Auditory('Consultar tipos de comprobante WSCDC')
   @ApiOperation({
     summary: 'Consultar tipos de comprobante',
@@ -857,7 +858,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   }
 
   @Post('wscdc/tipos-documento')
-  @Billable()
+  @ConsultaBillable()
   @Auditory('Consultar tipos de documento WSCDC')
   @ApiOperation({
     summary: 'Consultar tipos de documento',
@@ -886,7 +887,7 @@ Todas las facturas del lote comparten: emisor, tipo de comprobante, letra y punt
   }
 
   @Post('wscdc/tipos-opcionales')
-  @Billable()
+  @ConsultaBillable()
   @Auditory('Consultar tipos de datos opcionales WSCDC')
   @ApiOperation({
     summary: 'Consultar tipos de datos opcionales',

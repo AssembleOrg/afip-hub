@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '@/database/prisma.service';
 import { SubscriptionsService } from './subscriptions.service';
+import { UsageService } from '@/modules/usage/usage.service';
 import { SubscriptionStatus } from '../../../generated/prisma';
 
 /**
@@ -17,7 +18,38 @@ export class BillingCron {
   constructor(
     private readonly prisma: PrismaService,
     private readonly subscriptions: SubscriptionsService,
+    private readonly usage: UsageService,
   ) {}
+
+  /**
+   * Las orgs sin suscripción en MercadoPago (Free, canceladas o con plan
+   * asignado por admin) no tienen un pago que avance el período: lo avanzamos
+   * acá para que el cupo se renueve todos los meses.
+   */
+  @Cron(CronExpression.EVERY_HOUR, { name: 'period-rollover-free' })
+  async rollFreePeriods() {
+    const now = new Date();
+    const due = await this.prisma.organization.findMany({
+      where: { mpPreapprovalId: null, currentPeriodEnd: { lte: now }, deletedAt: null },
+      select: { id: true, slug: true },
+    });
+    for (const org of due) {
+      try {
+        // Puede estar atrasada varios meses: avanzamos hasta el ciclo vigente.
+        for (let i = 0; i < 24; i++) {
+          await this.usage.rollToNextPeriod(org.id);
+          const fresh = await this.prisma.organization.findUnique({
+            where: { id: org.id },
+            select: { currentPeriodEnd: true },
+          });
+          if (!fresh || fresh.currentPeriodEnd > now) break;
+        }
+      } catch (err) {
+        this.logger.error(`Fallo rollover org=${org.slug}: ${String(err)}`);
+      }
+    }
+    if (due.length > 0) this.logger.log(`Período renovado para ${due.length} orgs sin suscripción`);
+  }
 
   @Cron(CronExpression.EVERY_HOUR, { name: 'billing-recalc' })
   async recalcUpcomingAmounts() {

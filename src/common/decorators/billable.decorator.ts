@@ -10,8 +10,10 @@ export interface BillableMetadata {
 
 /**
  * Declara el tipo de uso del endpoint:
- *  - `BILLABLE` (default): descuenta 1 request de la quota del plan.
- *  - `PDF`: descuenta 1 request + aplica rate-limit propio (puppeteer es caro).
+ *  - `BILLABLE` (default): emite un comprobante; descuenta 1 del cupo de
+ *    comprobantes del plan (solo si ARCA lo aprueba).
+ *  - `PDF`: descuenta 1 del cupo de PDFs + rate-limit propio (puppeteer es caro).
+ *  - `CONSULTA`: consulta a ARCA; NO cuenta para el cupo, solo rate-limit.
  *  - `TA`: NO cuenta para quota, pero aplica rate-limit anti-abuso.
  *  - `NON_BILLABLE`: gratis, sin rate-limit.
  *
@@ -25,3 +27,4 @@ export const Billable = (meta: Partial<BillableMetadata> = {}) =>
 
 export const PdfBillable = () => Billable({ kind: UsageKind.PDF });
 export const TaBillable = () => Billable({ kind: UsageKind.TA });
+export const ConsultaBillable = () => Billable({ kind: UsageKind.CONSULTA });

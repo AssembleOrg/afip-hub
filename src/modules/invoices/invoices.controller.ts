@@ -16,7 +16,7 @@ import { CreateCreditNoteDto } from './dto/create-credit-note.dto';
 import { ListInvoicesQueryDto } from './dto/list-invoices-query.dto';
 import { VerifyInvoiceDto } from './dto/verify-invoice.dto';
 import { AfipService } from '@/modules/afip/afip.service';
-import { Billable, CurrentUser, Idempotent } from '@/common/decorators';
+import { Billable, ConsultaBillable, CurrentUser, Idempotent } from '@/common/decorators';
 import type { AuthenticatedUser, SaasRequest } from '@/common/types';
 import { PrismaService } from '@/database/prisma.service';
 
@@ -123,7 +123,7 @@ export class InvoicesController {
   }
 
   @Post(':id/verify')
-  @Billable()
+  @ConsultaBillable()
   @ApiOperation({
     summary: 'Verificar una factura propia contra AFIP (constatación WSCDC)',
     description:

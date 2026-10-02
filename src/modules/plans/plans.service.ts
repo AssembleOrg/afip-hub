@@ -63,6 +63,15 @@ export class PlansService {
           taRateLimitPerMin: dto.taRateLimitPerMin,
         }),
         ...(dto.graceFactor !== undefined && { graceFactor: dto.graceFactor }),
+        ...(dto.pdfLimit !== undefined && { pdfLimit: dto.pdfLimit }),
+        ...(dto.consultaRateLimitPerMin !== undefined && {
+          consultaRateLimitPerMin: dto.consultaRateLimitPerMin,
+        }),
+        ...(dto.overagePriceUsd !== undefined && { overagePriceUsd: dto.overagePriceUsd }),
+        ...(dto.pdfOveragePriceUsd !== undefined && {
+          pdfOveragePriceUsd: dto.pdfOveragePriceUsd,
+        }),
+        ...(dto.overageCapFactor !== undefined && { overageCapFactor: dto.overageCapFactor }),
         ...(dto.features !== undefined && { features: dto.features as any }),
         ...(dto.isActive !== undefined && { isActive: dto.isActive }),
         ...(dto.isPublic !== undefined && { isPublic: dto.isPublic }),

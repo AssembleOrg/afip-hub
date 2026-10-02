@@ -21,6 +21,10 @@ export interface ResolvedOrganization {
   graceFactor: number;
   pdfRateLimitPerMin: number;
   taRateLimitPerMin: number;
+  consultaRateLimitPerMin: number;
+  overagePriceUsd: number;
+  pdfOveragePriceUsd: number;
+  overageCapFactor: number;
   cuitLimit: number;
   subscriptionStatus: string;
   currentPeriodStart: Date;
@@ -38,5 +42,5 @@ export interface SaasRequest extends Request {
   user?: AuthenticatedUser;
   organization?: ResolvedOrganization;
   apiKey?: ResolvedApiKey;
-  _quotaWarning?: 'grace';
+  _quotaWarning?: 'grace' | 'overage';
 }

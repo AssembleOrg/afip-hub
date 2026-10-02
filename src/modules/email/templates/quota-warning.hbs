@@ -1,6 +1,6 @@
 <h1 style="margin:0 0 16px;color:#0F172A;font-size:28px;font-weight:700;letter-spacing:-0.02em;line-height:1.2;">Consumiste el {{percentUsed}}% de tu plan</h1>
 <p style="margin:0 0 24px;color:#475569;font-size:16px;line-height:1.6;">
-  Hola {{userName}}, tu organización <strong style="color:#0F172A;">{{orgName}}</strong> usó <strong>{{used}}</strong> de los <strong>{{limit}}</strong> requests del plan <strong>{{planName}}</strong> este ciclo.
+  Hola {{userName}}, tu organización <strong style="color:#0F172A;">{{orgName}}</strong> usó <strong>{{used}}</strong> de los <strong>{{limit}}</strong> comprobantes del plan <strong>{{planName}}</strong> este ciclo.
 </p>
 
 <div style="padding:20px;background:#F8FAFC;border-radius:12px;margin:24px 0;">
@@ -9,7 +9,7 @@
   </div>
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
     <tr>
-      <td align="left" style="color:#475569;font-size:14px;">{{used}} requests</td>
+      <td align="left" style="color:#475569;font-size:14px;">{{used}} comprobantes</td>
       <td align="right" style="color:#475569;font-size:14px;">{{limit}} del plan</td>
     </tr>
   </table>
@@ -28,5 +28,5 @@
 </table>
 
 <p style="margin:24px 0 0;color:#64748B;font-size:13px;line-height:1.5;">
-  Cuando llegues al 100%, los requests excedentes entrarán en el 2% de gracia. Si agotás también la gracia, se bloquearán hasta renovar el ciclo o subir de plan.
+  Si tu plan incluye excedente, al pasar el 100% seguís emitiendo y cada comprobante extra se suma al próximo cobro. Si no lo incluye (plan Free), la emisión se bloquea hasta renovar el ciclo o subir de plan.
 </p>

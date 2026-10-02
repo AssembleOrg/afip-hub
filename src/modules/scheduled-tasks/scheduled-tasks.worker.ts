@@ -123,14 +123,18 @@ export class ScheduledTasksWorker {
         },
       });
 
-      // Registrar uso como BILLABLE para que cuente en la quota de la org.
+      // Solo las tareas que emiten un comprobante aprobado consumen cupo;
+      // el resto son consultas a ARCA y se registran sin costo.
+      const emitted =
+        task.type === ScheduledTaskType.INVOICE &&
+        (result as { resultado?: string } | null)?.resultado !== 'R';
       await this.usage.recordEvent({
         organizationId: task.organizationId,
         apiKeyId: null,
         endpoint: `/scheduled-tasks/${task.type.toLowerCase()}`,
         method: 'INTERNAL',
-        kind: UsageKind.BILLABLE,
-        cost: 1,
+        kind: emitted ? UsageKind.BILLABLE : UsageKind.CONSULTA,
+        cost: emitted ? 1 : 0,
         statusCode: 200,
         durationMs: ended.getTime() - started.getTime(),
         ip: null,

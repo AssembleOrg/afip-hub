@@ -289,6 +289,10 @@ export class SubscriptionsService {
       ? Number(sub.lastExchangeRate)
       : await this.exchangeRate.getSellRate();
     const amountUsd = Number(sub.lastAmountUsd ?? 0) || 0;
+    const plan = await this.prisma.plan.findUnique({ where: { id: sub.planId } });
+    const overageUsd = Math.max(0, Math.round((amountUsd - Number(plan?.priceUsd ?? 0)) * 100) / 100);
+    // Conteo del excedente del ciclo que se está cobrando (antes de avanzar el período).
+    const overage = await this.usage.getCurrentOverage(sub.organizationId);
 
     const existing = await this.prisma.payment.findUnique({
       where: { mpPaymentId: String(payment.id) },
@@ -310,6 +314,9 @@ export class SubscriptionsService {
           amountArs: payment.transaction_amount,
           amountUsd,
           exchangeRate: sellRate,
+          overageUsd,
+          overageComprobantes: overage.comprobantes,
+          overagePdfs: overage.pdfs,
           status,
           periodStart: sub.organization.currentPeriodStart,
           periodEnd: sub.organization.currentPeriodEnd,
@@ -449,7 +456,11 @@ export class SubscriptionsService {
     if (!sub) return { updated: false, reason: 'sin_subscription' };
 
     const sellRate = await this.exchangeRate.getSellRate();
-    const newAmountArs = Number(org.plan.priceUsd) * sellRate;
+    // El próximo débito cubre el plan del ciclo que arranca + el excedente
+    // (comprobantes/PDFs por encima del cupo) del ciclo que termina.
+    const overage = await this.usage.getCurrentOverage(organizationId);
+    const amountUsd = Number(org.plan.priceUsd) + overage.usd;
+    const newAmountArs = Math.round(amountUsd * sellRate * 100) / 100;
     const lastAmount = Number(sub.lastAmountArs ?? 0);
 
     // Si cambia menos de $1, no molestamos a MP.
@@ -462,16 +473,16 @@ export class SubscriptionsService {
       where: { id: sub.id },
       data: {
         lastAmountArs: newAmountArs,
-        lastAmountUsd: Number(org.plan.priceUsd),
+        lastAmountUsd: amountUsd,
         lastExchangeRate: sellRate,
       },
     });
 
-    // Evento de blue-jumped si el cambio supera threshold (10% default) —
-    // esto avisa al cliente antes del cobro y flaggea re-auth si >20%.
-    const pctChange = lastAmount > 0
-      ? Math.abs(newAmountArs - lastAmount) / lastAmount
-      : 0;
+    // Evento de blue-jumped si el dólar se movió más del 10% — avisa al
+    // cliente antes del cobro y flaggea re-auth si >20%. Se mide sobre el tipo
+    // de cambio, no sobre el monto, para que el excedente no lo dispare.
+    const lastRate = Number(sub.lastExchangeRate ?? 0);
+    const pctChange = lastRate > 0 ? Math.abs(sellRate - lastRate) / lastRate : 0;
     if (pctChange >= 0.1) {
       const owner = await this.prisma.user.findUnique({
         where: { id: org.ownerUserId },
@@ -486,7 +497,7 @@ export class SubscriptionsService {
           periodStart: org.currentPeriodStart,
           amountUsd: Number(org.plan.priceUsd),
           oldAmountArs: lastAmount,
-          newAmountArs,
+          newAmountArs: Math.round(Number(org.plan.priceUsd) * sellRate * 100) / 100,
           exchangeRate: sellRate,
           exchangeRateDate: new Date(),
           nextBillingDate: org.currentPeriodEnd,
@@ -568,7 +579,10 @@ export class SubscriptionsService {
             priceUsd: Number(plan.priceUsd),
             priceArsEstimate,
             requestsLimit: plan.requestsLimit,
+            pdfLimit: plan.pdfLimit,
             cuitLimit: plan.cuitLimit,
+            overagePriceUsd: Number(plan.overagePriceUsd),
+            pdfOveragePriceUsd: Number(plan.pdfOveragePriceUsd),
           }
         : null,
       nextChargeAt: org?.currentPeriodEnd?.toISOString() ?? null,
