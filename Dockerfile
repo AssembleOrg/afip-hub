@@ -1,12 +1,15 @@
-# Use Node.js 20 LTS
-FROM node:20-alpine AS base
+# Imagen oficial de Playwright (Ubuntu noble + Node + Chromium y sus libs),
+# igual que multas-next. Antes era node:20-alpine con puppeteer: el Chrome que
+# baja puppeteer es glibc y en Alpine (musl) no arranca → todos los PDFs 500.
+# El tag DEBE coincidir con "playwright" en package.json (1.62.1).
+FROM mcr.microsoft.com/playwright:v1.62.1-noble AS base
 
-# Install pnpm and OpenSSL (required for Prisma)
-RUN apk add --no-cache openssl && \
-    corepack enable && \
+# Los navegadores ya vienen en la imagen (/ms-playwright).
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
+RUN corepack enable && \
     corepack prepare pnpm@10.10.0 --activate
 
-# Set working directory
 WORKDIR /app
 
 # Copy package files
@@ -31,10 +34,15 @@ COPY . .
 RUN pnpm build
 
 # Production stage
-FROM node:20-alpine AS production
+FROM mcr.microsoft.com/playwright:v1.62.1-noble AS production
 
-# Install OpenSSL for Prisma
-RUN apk add --no-cache openssl
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
+# tini como PID 1: cosecha los procesos huérfanos de Chromium (sin él quedan
+# zombies ocupando PIDs hasta agotar pids.max del contenedor).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends tini && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -60,6 +68,5 @@ COPY --from=base /app/dist ./dist
 # Expose port
 EXPOSE 3000
 
-# Start the application
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["pnpm", "start:prod"]
-

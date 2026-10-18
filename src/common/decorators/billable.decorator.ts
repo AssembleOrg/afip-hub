@@ -12,7 +12,7 @@ export interface BillableMetadata {
  * Declara el tipo de uso del endpoint:
  *  - `BILLABLE` (default): emite un comprobante; descuenta 1 del cupo de
  *    comprobantes del plan (solo si ARCA lo aprueba).
- *  - `PDF`: descuenta 1 del cupo de PDFs + rate-limit propio (puppeteer es caro).
+ *  - `PDF`: descuenta 1 del cupo de PDFs + rate-limit propio (Chromium es caro).
  *  - `CONSULTA`: consulta a ARCA; NO cuenta para el cupo, solo rate-limit.
  *  - `TA`: NO cuenta para quota, pero aplica rate-limit anti-abuso.
  *  - `NON_BILLABLE`: gratis, sin rate-limit.
