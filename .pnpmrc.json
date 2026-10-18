@@ -1,1 +1,1 @@
-{"onlyBuiltDependencies":["puppeteer","@prisma/engines","prisma","bcrypt","unrs-resolver"]}
+{"onlyBuiltDependencies":["@prisma/engines","prisma","bcrypt","unrs-resolver"]}

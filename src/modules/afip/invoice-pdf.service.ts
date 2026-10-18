@@ -6,15 +6,26 @@ import * as path from 'path';
 import { GenerateInvoicePdfDto } from './dto/generate-invoice-pdf.dto';
 import { GenerateInvoicePdfBatchDto } from './dto/generate-invoice-pdf-batch.dto';
 
+import { chromium, type Browser } from 'playwright';
+
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const archiver = require('archiver');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const puppeteer = require('puppeteer');
+
+const BROWSER_ARGS = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  // chrome_crashpad_handler sobrevive a browser.close(): un huérfano por launch
+  // va sumando tasks hasta agotar pids.max del contenedor (lección de
+  // afip-comprobantes / multas-next).
+  '--disable-crashpad',
+];
 
 @Injectable()
 export class InvoicePdfService implements OnModuleDestroy {
   private readonly logger = new Logger(InvoicePdfService.name);
-  private browser: any = null;
+  private browser: Browser | null = null;
+  private launching: Promise<Browser> | null = null;
   private template: HandlebarsTemplateDelegate;
 
   constructor() {
@@ -42,29 +53,54 @@ export class InvoicePdfService implements OnModuleDestroy {
   }
 
   async onModuleDestroy() {
-    if (this.browser) {
-      await this.browser.close();
-      this.browser = null;
-    }
+    const browser = this.browser;
+    this.browser = null;
+    await browser?.close();
   }
 
-  private async getBrowser() {
-    if (!this.browser) {
-      this.browser = await puppeteer.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-      });
+  /**
+   * Un solo Chromium compartido. Si se cae (OOM, crash), `disconnected` lo
+   * descarta y el próximo pedido lo relanza: antes quedaba cacheado muerto y
+   * todos los PDFs devolvían 500 hasta reiniciar el servicio.
+   */
+  private async getBrowser(): Promise<Browser> {
+    if (this.browser?.isConnected()) return this.browser;
+    if (!this.launching) {
+      this.launching = chromium
+        .launch({ headless: true, args: BROWSER_ARGS })
+        .then((browser) => {
+          browser.on('disconnected', () => {
+            if (this.browser !== browser) return; // cierre propio (onModuleDestroy)
+            this.browser = null;
+            this.logger.warn('Chromium desconectado; se relanza en el próximo PDF');
+          });
+          this.browser = browser;
+          return browser;
+        })
+        .finally(() => {
+          this.launching = null;
+        });
     }
-    return this.browser;
+    return this.launching;
   }
 
   async generatePdf(dto: GenerateInvoicePdfDto): Promise<Buffer> {
     const qrDataUrl = await this.generateQrDataUrl(dto);
     const html = this.renderHtml(dto, qrDataUrl);
 
+    try {
+      return await this.renderPdf(html);
+    } catch (err) {
+      // Un reintento con navegador nuevo si el anterior murió en el medio.
+      if (this.browser?.isConnected()) throw err;
+      this.logger.warn(`PDF falló con Chromium caído, reintento: ${err.message}`);
+      return this.renderPdf(html);
+    }
+  }
+
+  private async renderPdf(html: string): Promise<Buffer> {
     const browser = await this.getBrowser();
     const page = await browser.newPage();
-
     try {
       await page.setContent(html, { waitUntil: 'domcontentloaded' });
       const pdfBuffer = await page.pdf({
@@ -74,7 +110,7 @@ export class InvoicePdfService implements OnModuleDestroy {
       });
       return Buffer.from(pdfBuffer);
     } finally {
-      await page.close();
+      await page.close().catch(() => undefined);
     }
   }
 
