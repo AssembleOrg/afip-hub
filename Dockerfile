@@ -38,6 +38,10 @@ FROM mcr.microsoft.com/playwright:v1.62.1-noble AS production
 
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
+# servicios1.afip.gov.ar (WSFE) negocia DHE con clave de 1024 bits; el Node de
+# esta imagen corre con SECLEVEL=2 y corta el handshake ("dh key too small").
+ENV NODE_OPTIONS=--tls-cipher-list=DEFAULT:@SECLEVEL=1
+
 # tini como PID 1: cosecha los procesos huérfanos de Chromium (sin él quedan
 # zombies ocupando PIDs hasta agotar pids.max del contenedor).
 RUN apt-get update && \
