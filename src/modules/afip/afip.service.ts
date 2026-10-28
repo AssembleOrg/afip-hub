@@ -7,6 +7,7 @@ import * as path from 'path';
 import { execSync } from 'child_process';
 import * as xml2js from 'xml2js';
 import * as crypto from 'crypto';
+import { safeStringify } from '../../common/utils/sanitize-log-body';
 import { AfipTicketDto } from './dto';
 import { 
   CreateInvoiceDto, 
@@ -607,8 +608,8 @@ export class AfipService implements OnModuleInit {
             { in0: signedTra },
             async (err: any, result: any) => {
               if (err) {
-                this.logger.error(`Error al llamar WSAA: ${err.message || JSON.stringify(err)}`);
-                reject(new Error(`Error al llamar WSAA: ${err.message || JSON.stringify(err)}`));
+                this.logger.error(`Error al llamar WSAA: ${err.message || safeStringify(err)}`);
+                reject(new Error(`Error al llamar WSAA: ${err.message || safeStringify(err)}`));
                 return;
               }
 
@@ -620,7 +621,7 @@ export class AfipService implements OnModuleInit {
                 resolve(ticket);
               } catch (parseError: any) {
                 this.logger.error(`Error al parsear respuesta: ${parseError.message}`);
-                this.logger.error(`Respuesta recibida: ${JSON.stringify(result, null, 2)}`);
+                this.logger.error(`Respuesta recibida: ${safeStringify(result, null, 2)}`);
                 reject(new Error(`Error al parsear respuesta: ${parseError.message}`));
               }
             },
@@ -742,7 +743,7 @@ export class AfipService implements OnModuleInit {
     this.logger.log(`Tipo de comprobante: ${tipoComprobante}`);
     this.logger.log(`CUIT: ${cuit}`);
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
-    this.logger.log(`Ticket: ${JSON.stringify(ticket, null, 2)}`);
+    this.logger.log(`Ticket: ${safeStringify(ticket, null, 2)}`);
 
     return new Promise((resolve, reject) => {
       const urls = this.getAfipUrls(homologacion);
@@ -776,13 +777,13 @@ export class AfipService implements OnModuleInit {
         };
 
         this.logger.log('=== REQUEST FECompUltimoAutorizado ===');
-        this.logger.log(JSON.stringify(req, null, 2));
+        this.logger.log(safeStringify(req, null, 2));
 
         client.FECompUltimoAutorizado(req, (err: any, result: any) => {
           this.logger.log('=== RESPONSE FECompUltimoAutorizado ===');
-          this.logger.log(JSON.stringify(result, null, 2));
+          this.logger.log(safeStringify(result, null, 2));
           this.logger.log('=== ERROR FECompUltimoAutorizado ===');
-          this.logger.log(JSON.stringify(err, null, 2));
+          this.logger.log(safeStringify(err, null, 2));
           if (err) {
             // Si el error es "Not Found" o similar, significa que no hay comprobantes previos
             // Esto es normal en la primera factura de un punto de venta/tipo
@@ -823,7 +824,7 @@ export class AfipService implements OnModuleInit {
             this.logger.error(
               `Error al llamar FECompUltimoAutorizado: ${err.message}`,
             );
-            this.logger.error(`Error completo: ${JSON.stringify(err, null, 2)}`);
+            this.logger.error(`Error completo: ${safeStringify(err, null, 2)}`);
             reject(
               new BadRequestException(
                 `Error en FECompUltimoAutorizado: ${err.message}`,
@@ -835,7 +836,7 @@ export class AfipService implements OnModuleInit {
           const data = result.FECompUltimoAutorizadoResult;
 
           this.logger.log('=== FECompUltimoAutorizadoResult ===');
-          this.logger.log(JSON.stringify(data, null, 2));
+          this.logger.log(safeStringify(data, null, 2));
 
           // Verificar errores
           if (data.Errors && data.Errors.length > 0) {
@@ -984,7 +985,7 @@ export class AfipService implements OnModuleInit {
           this.logger.log(`CUIT a Consultar (limpio): ${cuitAConsultarClean}`);
           this.logger.log(`Token (primeros 50 chars): ${ticket.token.substring(0, 50)}...`);
           this.logger.log(`Sign (primeros 50 chars): ${ticket.sign.substring(0, 50)}...`);
-          this.logger.log('Request completo: ' + JSON.stringify(req, null, 2));
+          this.logger.log('Request completo: ' + safeStringify(req, null, 2));
 
           // Método según documentación v3.4: getPersona_v2 (versión más reciente)
           // También existe getPersona pero se recomienda usar _v2
@@ -1011,7 +1012,7 @@ export class AfipService implements OnModuleInit {
               this.logger.error(`Error al consultar contribuyente: ${err.message}`);
               // Intentar loguear el error de forma segura
               try {
-                this.logger.error('Error completo: ' + JSON.stringify(err, null, 2));
+                this.logger.error('Error completo: ' + safeStringify(err, null, 2));
               } catch (e) {
                 this.logger.error(`Error (no serializable): ${err.toString()}`);
               }
@@ -1045,7 +1046,7 @@ export class AfipService implements OnModuleInit {
             try {
               this.logger.log('=== personaReturn (Padrón A13) ===');
               this.logger.log(
-                JSON.stringify(
+                safeStringify(
                   {
                     errorConstancia: personaReturn.errorConstancia,
                     idPersona: persona.idPersona,
@@ -1200,7 +1201,7 @@ export class AfipService implements OnModuleInit {
             };
 
             this.logger.log('=== DATOS CONTRIBUYENTE (Padrón A13) ===');
-            this.logger.log(JSON.stringify(response, null, 2));
+            this.logger.log(safeStringify(response, null, 2));
             this.logger.log('=== FIN CONSULTA CONTRIBUYENTE ===');
 
             resolve(response);
@@ -1247,7 +1248,7 @@ export class AfipService implements OnModuleInit {
   ): Promise<InvoiceResponseDto> {
     try {
       this.logger.log('=== INICIO CREACIÓN DE FACTURA ===');
-      this.logger.log(`Datos recibidos: ${JSON.stringify(invoiceData, null, 2)}`);
+      this.logger.log(`Datos recibidos: ${safeStringify(invoiceData, null, 2)}`);
 
       // Validar que se proporcionen certificado, clave y CUIT
       const certificado = (invoiceData as any).certificado;
@@ -1300,7 +1301,7 @@ export class AfipService implements OnModuleInit {
         );
       } catch (error: any) {
         this.logger.error('=== ERROR EN getUltimoAutorizado ===');
-        this.logger.error(JSON.stringify(error, null, 2));
+        this.logger.error(safeStringify(error, null, 2));
         // Si el error es "Not Found", es la primera factura - usar valores por defecto
         const errorMessage = (error.message || '').toLowerCase();
         if (errorMessage.includes('not found') || errorMessage.includes('no encontrado')) {
@@ -1312,7 +1313,7 @@ export class AfipService implements OnModuleInit {
           const fechaActual = `${year}${month}${day}`;
           ultimo = { CbteNro: 0, CbteFch: fechaActual };
         } else {
-          this.logger.error('Error al obtener último comprobante autorizado: ' + JSON.stringify(error, null, 2));
+          this.logger.error('Error al obtener último comprobante autorizado: ' + safeStringify(error, null, 2));
           // Re-lanzar otros errores
           throw error;
         }
@@ -1563,7 +1564,7 @@ export class AfipService implements OnModuleInit {
       };
 
       this.logger.log('=== PAYLOAD ENVIADO A AFIP ===');
-      this.logger.log(JSON.stringify(fecaeReq, null, 2));
+      this.logger.log(safeStringify(fecaeReq, null, 2));
 
       // Crear cliente SOAP para WSFE
       return new Promise((resolve, reject) => {
@@ -1581,20 +1582,20 @@ export class AfipService implements OnModuleInit {
           client.FECAESolicitar(fecaeReq, async (err: any, result: any) => {
             if (err) {
               this.logger.error(`Error al llamar FECAESolicitar: ${err.message}`);
-              this.logger.error(`Error completo: ${JSON.stringify(err, null, 2)}`);
+              this.logger.error(`Error completo: ${safeStringify(err, null, 2)}`);
               reject(new BadRequestException(`Error al crear factura: ${err.message}`));
               return;
             }
 
             try {
               this.logger.log('=== RESPUESTA COMPLETA DE AFIP ===');
-              this.logger.log(JSON.stringify(result, null, 2));
+              this.logger.log(safeStringify(result, null, 2));
 
               const response = result.FECAESolicitarResult;
               
               // Log de la respuesta completa
               this.logger.log('=== FECAESolicitarResult ===');
-              this.logger.log(JSON.stringify(response, null, 2));
+              this.logger.log(safeStringify(response, null, 2));
 
               // Verificar errores en la cabecera (estructura: Errors.Err[])
               // No rechazar aquí, dejar que se procesen junto con las observaciones del detalle
@@ -1625,13 +1626,13 @@ export class AfipService implements OnModuleInit {
               
               if (!factura) {
                 this.logger.error('No se encontró FECAEDetResponse en la respuesta');
-                this.logger.error(`FeDetResp completo: ${JSON.stringify(response.FeDetResp, null, 2)}`);
+                this.logger.error(`FeDetResp completo: ${safeStringify(response.FeDetResp, null, 2)}`);
                 reject(new BadRequestException('No se recibió respuesta válida de AFIP (sin FECAEDetResponse)'));
                 return;
               }
 
               this.logger.log('=== DETALLE DE LA FACTURA ===');
-              this.logger.log(JSON.stringify(factura, null, 2));
+              this.logger.log(safeStringify(factura, null, 2));
 
               // Extraer errores y observaciones (pueden estar en diferentes formatos)
               // AFIP puede enviar:
@@ -1801,7 +1802,7 @@ export class AfipService implements OnModuleInit {
               };
 
               this.logger.log('=== RESPUESTA FINAL ===');
-              this.logger.log(JSON.stringify(invoiceResponse, null, 2));
+              this.logger.log(safeStringify(invoiceResponse, null, 2));
               this.logger.log('=== FIN CREACIÓN DE FACTURA ===');
 
               resolve(invoiceResponse);
@@ -2075,7 +2076,7 @@ export class AfipService implements OnModuleInit {
     this.logger.log(`Página: ${pagina}, Items por página: ${itemsPorPagina}`);
     this.logger.log(`Entorno: ${homologacion ? 'HOMOLOGACIÓN' : 'PRODUCCIÓN'}`);
     if (filtros) {
-      this.logger.log(`Filtros: ${JSON.stringify(filtros)}`);
+      this.logger.log(`Filtros: ${safeStringify(filtros)}`);
     }
 
     const ticket = await this.getTicket(AfipService.VE_WSAA_SERVICE, certificado, clavePrivada, homologacion);
@@ -2164,7 +2165,7 @@ export class AfipService implements OnModuleInit {
           filter,
         };
 
-        this.logger.log('Request a VE: ' + JSON.stringify(request, null, 2));
+        this.logger.log('Request a VE: ' + safeStringify(request, null, 2));
 
         const procesarRespuesta = (result: any) => {
           // Parsear respuesta según estructura del PDF
@@ -2217,7 +2218,7 @@ export class AfipService implements OnModuleInit {
         // el piso y se autoajusta si la ventana avanza.
         const ejecutar = (fechaDesdeEfectiva: string | undefined, esReintento: boolean) => {
           const request = buildRequest(fechaDesdeEfectiva);
-          this.logger.log('Request a VE: ' + JSON.stringify(request, null, 2));
+          this.logger.log('Request a VE: ' + safeStringify(request, null, 2));
 
           client.consultarComunicaciones(request, (err: any, result: any) => {
             if (err) {
@@ -2347,7 +2348,7 @@ export class AfipService implements OnModuleInit {
           incluirAdjuntos: incluirAdjuntos,
         };
 
-        this.logger.log('Request a VE consumirComunicacion: ' + JSON.stringify(request, null, 2));
+        this.logger.log('Request a VE consumirComunicacion: ' + safeStringify(request, null, 2));
 
         client.consumirComunicacion(request, async (err: any, result: any) => {
           if (err) {
@@ -2839,7 +2840,7 @@ export class AfipService implements OnModuleInit {
           request.cuitEmisorComprobante = cuitEmisorComprobante.replace(/-/g, '');
         }
 
-        this.logger.log('Request a WSCDC ComprobanteConstatar: ' + JSON.stringify(request, null, 2));
+        this.logger.log('Request a WSCDC ComprobanteConstatar: ' + safeStringify(request, null, 2));
 
         client.ComprobanteConstatar(request, (err: any, result: any) => {
           if (err) {
@@ -2850,7 +2851,7 @@ export class AfipService implements OnModuleInit {
 
           try {
             this.logger.log('Respuesta recibida de WSCDC (ComprobanteConstatar)');
-            this.logger.log(JSON.stringify(result, null, 2));
+            this.logger.log(safeStringify(result, null, 2));
 
             const responseData = result?.ComprobanteConstatarResult || result?.Result || result;
             
