@@ -1341,13 +1341,17 @@ export class AfipService implements OnModuleInit {
         numeroAUsar = proximoNumero;
       }
 
-      // Fecha: AFIP no permite fecha anterior a la del último comprobante
-      const fechaCbte = invoiceData.fechaComprobante;
+      // Fecha: AFIP no permite fecha anterior a la del último comprobante.
+      // En vez de rechazar, ajustamos a la fecha mayor entre la pedida y la del
+      // último comprobante (clamp). Así un desfasaje de zona horaria o un
+      // reintento no tiran la emisión. La fecha pedida ya viene en horario
+      // argentino desde el emisor.
+      let fechaCbte = invoiceData.fechaComprobante;
       if (ultimaFecha && fechaCbte < ultimaFecha) {
-        throw new BadRequestException(
-          `La fecha del comprobante (${fechaCbte}) no puede ser anterior a la del último comprobante autorizado (${ultimaFecha}). ` +
-          `AFIP solo permite fechas iguales o posteriores al último comprobante emitido para este punto de venta y tipo de comprobante.`,
+        this.logger.warn(
+          `Fecha pedida (${fechaCbte}) anterior a la del último comprobante (${ultimaFecha}); se ajusta a ${ultimaFecha}.`,
         );
+        fechaCbte = ultimaFecha;
       }
 
       this.logger.log(`Usando número de comprobante: ${numeroAUsar}`);
